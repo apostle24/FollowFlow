@@ -202,7 +202,7 @@ export const AppointmentModal: React.FC<AppointmentModalProps> = ({
                 {initialAppointment?.id ? 'Edit Appointment' : 'Schedule Appointment'}
               </h2>
               <p className="text-xs text-slate-500">
-                Consistent ISO timestamp formatting stored directly in Firestore.
+                Schedule client appointments and calendar reminders.
               </p>
             </div>
           </div>

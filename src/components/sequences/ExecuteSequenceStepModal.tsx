@@ -13,10 +13,13 @@ import {
   Clock,
   Wand2,
   Phone,
+  SendHorizontal,
 } from 'lucide-react';
 import { useFollowUp } from '../../context/FollowUpContext';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../common/Toast';
 import { generateSequenceVariations } from '../../services/ai';
+import { sendDirectEmail } from '../../services/email';
 import { getTodayString } from '../../services/db';
 import type { SequenceEnrollment, Sequence, SequenceStep, SequenceVariation, FollowUpChannel } from '../../types';
 
@@ -29,7 +32,7 @@ export const ExecuteSequenceStepModal: React.FC = () => {
     executeStep,
     changeEnrollmentStatus,
   } = useFollowUp();
-
+  const { user } = useAuth();
   const { success, error: toastError } = useToast();
 
   const [messageText, setMessageText] = useState('');
@@ -37,6 +40,7 @@ export const ExecuteSequenceStepModal: React.FC = () => {
   const [activeChannel, setActiveChannel] = useState<FollowUpChannel>('email');
   const [copied, setCopied] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [variations, setVariations] = useState<SequenceVariation[]>([]);
   const [isGeneratingVariations, setIsGeneratingVariations] = useState(false);
 
@@ -104,21 +108,99 @@ export const ExecuteSequenceStepModal: React.FC = () => {
     const rawPhone = activeEnrollmentToExecute.contactPhone || '';
     const cleanPhone = rawPhone.replace(/[^\d+]/g, '').replace('+', '');
     const encoded = encodeURIComponent(messageText);
+    const url = cleanPhone ? `https://wa.me/${cleanPhone}?text=${encoded}` : `https://wa.me/?text=${encoded}`;
 
-    if (cleanPhone) {
-      window.open(`https://wa.me/${cleanPhone}?text=${encoded}`, '_blank');
-    } else {
-      window.open(`https://wa.me/?text=${encoded}`, '_blank');
-    }
+    // Reliable link trigger for iframe compatibility
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
     success('WhatsApp opened!');
   };
 
   const handleOpenEmail = () => {
     const to = activeEnrollmentToExecute.contactEmail || '';
-    const sub = encodeURIComponent(subjectText);
+    const effectiveSubject =
+      subjectText.trim() ||
+      (activeEnrollmentToExecute.contactCompany
+        ? `Following up regarding ${activeEnrollmentToExecute.contactCompany}`
+        : activeEnrollmentToExecute.contactName
+        ? `Following up with ${activeEnrollmentToExecute.contactName}`
+        : 'Quick follow-up');
+    if (!subjectText.trim()) {
+      setSubjectText(effectiveSubject);
+    }
+    const sub = encodeURIComponent(effectiveSubject);
     const body = encodeURIComponent(messageText);
-    window.location.href = `mailto:${to}?subject=${sub}&body=${body}`;
+    const link = document.createElement('a');
+    link.href = `mailto:${to}?subject=${sub}&body=${body}`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
     success('Email client opened!');
+  };
+
+  const handleOpenSms = () => {
+    const rawPhone = activeEnrollmentToExecute.contactPhone || '';
+    const cleanPhone = rawPhone.replace(/[^\d+]/g, '');
+    const encoded = encodeURIComponent(messageText);
+    const link = document.createElement('a');
+    link.href = cleanPhone ? `sms:${cleanPhone}?body=${encoded}` : `sms:?body=${encoded}`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    success('SMS app opened!');
+  };
+
+  const handleDirectSendEmail = async () => {
+    const to = activeEnrollmentToExecute.contactEmail;
+    if (!to) {
+      toastError('This contact does not have an email address configured.');
+      return;
+    }
+    const effectiveSubject =
+      subjectText.trim() ||
+      (activeEnrollmentToExecute.contactCompany
+        ? `Following up regarding ${activeEnrollmentToExecute.contactCompany}`
+        : activeEnrollmentToExecute.contactName
+        ? `Following up with ${activeEnrollmentToExecute.contactName}`
+        : 'Quick follow-up');
+    if (!subjectText.trim()) {
+      setSubjectText(effectiveSubject);
+    }
+    if (!messageText.trim()) {
+      toastError('Please provide message body content.');
+      return;
+    }
+
+    setIsSendingEmail(true);
+    try {
+      const result = await sendDirectEmail({
+        userId: user?.uid || 'guest',
+        contactId: activeEnrollmentToExecute.contactId,
+        recipientName: activeEnrollmentToExecute.contactName,
+        to,
+        subject: effectiveSubject,
+        body: messageText.trim(),
+      });
+
+      if (result.success && result.status === 'sent') {
+        success(
+          'Email dispatched directly!',
+          `Delivered to ${to} via ${result.provider || 'cloud mail service'}.`
+        );
+      } else {
+        toastError(result.error || 'Direct email failed. You can also use "Open in Default Email App".');
+      }
+    } catch (err: any) {
+      toastError(err.message || 'Failed to dispatch direct email.');
+    } finally {
+      setIsSendingEmail(false);
+    }
   };
 
   const handleGenerateVariations = async () => {
@@ -132,7 +214,11 @@ export const ExecuteSequenceStepModal: React.FC = () => {
       });
 
       if (res.success && res.variations?.length) {
-        setVariations(res.variations);
+        const mappedVariations = res.variations.map((v, i) => ({
+          ...v,
+          id: v.id || `var-${Date.now()}-${i}`,
+        }));
+        setVariations(mappedVariations);
         success('Generated 3 AI variations for this message!');
       }
     } catch (err: any) {
@@ -317,11 +403,15 @@ export const ExecuteSequenceStepModal: React.FC = () => {
           {/* Email Subject Line */}
           {activeChannel === 'email' && (
             <div>
-              <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Subject Line</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-[11px] font-bold text-slate-600 uppercase">Subject Line</label>
+                <span className="text-[10px] text-slate-400">Included automatically in email header</span>
+              </div>
               <input
                 type="text"
                 value={subjectText}
                 onChange={(e) => setSubjectText(e.target.value)}
+                placeholder={`e.g. Following up regarding ${activeEnrollmentToExecute.contactCompany || activeEnrollmentToExecute.contactName || 'our discussion'}`}
                 className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-xs font-medium focus:ring-2 focus:ring-blue-500 outline-hidden"
               />
             </div>
@@ -350,38 +440,65 @@ export const ExecuteSequenceStepModal: React.FC = () => {
             />
           </div>
 
-          {/* 1-Click Launch Buttons */}
-          <div className="pt-2 flex flex-wrap items-center gap-2">
-            {activeChannel === 'whatsapp' ? (
-              <button
-                type="button"
-                onClick={handleOpenWhatsApp}
-                className="flex-1 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm shadow-emerald-200 flex items-center justify-center gap-2 transition-all"
-              >
-                <MessageSquare className="w-4 h-4" />
-                Open in WhatsApp Web / App
-                <ExternalLink className="w-3.5 h-3.5" />
-              </button>
-            ) : activeChannel === 'email' ? (
-              <button
-                type="button"
-                onClick={handleOpenEmail}
-                className="flex-1 py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-sm shadow-blue-200 flex items-center justify-center gap-2 transition-all"
-              >
-                <Mail className="w-4 h-4" />
-                Open in Default Email App
-                <ExternalLink className="w-3.5 h-3.5" />
-              </button>
+          {/* Multi-Channel Delivery Buttons */}
+          <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+            {activeChannel === 'email' ? (
+              <>
+                <button
+                  type="button"
+                  onClick={handleDirectSendEmail}
+                  disabled={isSendingEmail || !activeEnrollmentToExecute.contactEmail}
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold shadow-sm shadow-blue-200 flex items-center justify-center gap-2 transition-all"
+                >
+                  <SendHorizontal className="w-4 h-4" />
+                  {isSendingEmail ? 'Dispatching Direct...' : 'Send Direct to Inbox'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenEmail}
+                  className="py-2.5 px-3.5 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center justify-center gap-1.5 transition-all"
+                  title="Open locally in your default mail app"
+                >
+                  <Mail className="w-4 h-4 text-blue-600" />
+                  Mail App
+                  <ExternalLink className="w-3 h-3 text-slate-400" />
+                </button>
+              </>
+            ) : activeChannel === 'whatsapp' ? (
+              <>
+                <button
+                  type="button"
+                  onClick={handleOpenWhatsApp}
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm shadow-emerald-200 flex items-center justify-center gap-2 transition-all"
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  Open in WhatsApp Web / App
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </button>
+              </>
             ) : (
-              <button
-                type="button"
-                onClick={handleCopy}
-                className="flex-1 py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm shadow-indigo-200 flex items-center justify-center gap-2 transition-all"
-              >
-                <Copy className="w-4 h-4" />
-                Copy SMS Text to Send
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={handleOpenSms}
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm shadow-indigo-200 flex items-center justify-center gap-2 transition-all"
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  Open SMS Messenger
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </button>
+              </>
             )}
+
+            <button
+              type="button"
+              onClick={handleCopy}
+              className="py-2.5 px-3 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
+              title="Copy message to clipboard"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              {copied ? 'Copied' : 'Copy'}
+            </button>
           </div>
         </div>
 

@@ -1,5 +1,7 @@
-// Email Service for FollowFlow
-// Integrates with backend /api/email endpoints for direct email dispatch & scheduling
+// Email & Multi-Channel Delivery Service for FollowFlow
+// Integrates with backend /api/email and /api/delivery endpoints for real dispatch & auditability
+
+import type { DeliveryMetrics, FollowUpAttachment } from '../types';
 
 export interface EmailConfig {
   isConfigured: boolean;
@@ -14,7 +16,14 @@ export interface SendEmailParams {
   body: string;
   contactId?: string;
   followUpId?: string;
+  recipientName?: string;
   idempotencyKey?: string;
+  attachments?: Array<{
+    filename: string;
+    content: string; // Base64
+    mimeType?: string;
+    size?: number;
+  }>;
 }
 
 export interface SendEmailResponse {
@@ -22,6 +31,9 @@ export interface SendEmailResponse {
   status: 'sent' | 'failed';
   provider?: string;
   providerMessageId?: string;
+  recipientName?: string;
+  to?: string;
+  sentAt?: string;
   error?: string;
 }
 
@@ -36,13 +48,16 @@ export type ScheduledEmailJobStatus =
   | 'failed'
   | 'cancelled'
   | 'scheduled'
-  | 'sent';
+  | 'sent'
+  | 'delivered';
 
 export interface ScheduledEmailJob {
   id: string;
   userId: string;
   contactId?: string;
   followUpId?: string;
+  recipientName?: string;
+  channel?: string;
   to: string;
   subject: string;
   body: string;
@@ -52,7 +67,9 @@ export interface ScheduledEmailJob {
   idempotencyKey?: string;
   sentAt?: string;
   completedAt?: string;
+  deliveredAt?: string;
   providerMessageId?: string;
+  provider?: string;
   error?: string;
   lastError?: string;
   attempts?: number;
@@ -61,6 +78,12 @@ export interface ScheduledEmailJob {
   nextRetryAt?: string;
   lockedAt?: string;
   lockedBy?: string;
+  attachments?: Array<{
+    filename: string;
+    content: string;
+    mimeType?: string;
+    size?: number;
+  }>;
 }
 
 export interface ScheduleEmailResponse {
@@ -150,5 +173,75 @@ export async function cancelScheduledEmail(jobId: string): Promise<boolean> {
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+// Fetch real delivery metrics directly from application records
+export async function fetchDeliveryMetrics(userId?: string): Promise<DeliveryMetrics> {
+  try {
+    const url = userId ? `/api/delivery/metrics?userId=${encodeURIComponent(userId)}` : '/api/delivery/metrics';
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return (
+      data.metrics || {
+        emailsSentToday: 0,
+        emailsScheduled: 0,
+        emailsDelivered: 0,
+        emailsFailed: 0,
+        whatsappActions: 0,
+        callsInitiated: 0,
+        followUpsCompleted: 0,
+      }
+    );
+  } catch (err) {
+    console.warn('Could not fetch delivery metrics:', err);
+    return {
+      emailsSentToday: 0,
+      emailsScheduled: 0,
+      emailsDelivered: 0,
+      emailsFailed: 0,
+      whatsappActions: 0,
+      callsInitiated: 0,
+      followUpsCompleted: 0,
+    };
+  }
+}
+
+// Check provider delivery status
+export async function checkDeliveryStatus(providerMessageId: string): Promise<any> {
+  try {
+    const res = await fetch(`/api/email/status/${encodeURIComponent(providerMessageId)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.job;
+  } catch {
+    return null;
+  }
+}
+
+// Log real action (WhatsApp opened, Phone Call initiated, Manual Copied) to server & timeline
+export async function logDeliveryAction(params: {
+  userId: string;
+  contactId: string;
+  followUpId?: string;
+  channel: 'whatsapp' | 'phone' | 'manual' | 'email';
+  type: string;
+  title: string;
+  description?: string;
+  recipient?: string;
+  recipientPhone?: string;
+}): Promise<any> {
+  try {
+    const res = await fetch('/api/delivery/log-action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn('Failed to log delivery action:', err);
+    return null;
   }
 }

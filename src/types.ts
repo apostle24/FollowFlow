@@ -8,7 +8,13 @@ export interface Contact {
   email?: string;
   phone?: string;
   whatsapp?: string;
-  preferredChannel?: 'whatsapp' | 'email' | 'sms' | 'phone' | 'other';
+  project?: string;
+  service?: string;
+  amount?: number;
+  currency?: string;
+  preferredChannel?: 'whatsapp' | 'email' | 'sms' | 'phone' | 'manual' | 'other' | 'no_preference';
+  timezone?: string;
+  communicationConsent?: boolean;
   notes?: string;
   tags?: ContactTag[];
   createdAt: string;
@@ -16,10 +22,63 @@ export interface Contact {
 }
 
 export type FollowUpType = 'lead' | 'proposal' | 'invoice' | 'appointment' | 'customer' | 'general';
-export type FollowUpChannel = 'whatsapp' | 'email' | 'sms' | 'phone' | 'other';
+export type FollowUpChannel = 'whatsapp' | 'email' | 'sms' | 'phone' | 'manual' | 'other';
 export type FollowUpPriority = 'low' | 'medium' | 'high' | 'urgent';
 export type FollowUpStatus = 'pending' | 'contacted' | 'completed' | 'snoozed' | 'cancelled';
 export type MessageTone = 'friendly' | 'professional' | 'casual' | 'firm' | 'urgent' | 'short' | 'warm';
+
+export interface FollowUpAttachment {
+  attachmentId: string;
+  fileName: string;
+  mimeType: string;
+  storagePath?: string;
+  fileSize: number;
+  downloadUrl?: string;
+  contentBase64?: string; // Base64 encoded file for real provider transmission
+}
+
+export type UniversalDeliveryChannel = 'email' | 'whatsapp' | 'phone' | 'manual';
+export type UniversalDeliveryStatus =
+  | 'draft'
+  | 'scheduled'
+  | 'processing'
+  | 'sent'
+  | 'delivered'
+  | 'failed'
+  | 'cancelled';
+
+export interface UniversalFollowUpJob {
+  followUpId?: string;
+  userId: string;
+  contactId: string;
+  recipientName: string;
+  recipientEmail?: string;
+  recipientPhone?: string;
+  channel: UniversalDeliveryChannel;
+  subject?: string;
+  message: string;
+  scheduledFor?: string; // ISO 8601 UTC timestamp
+  status: UniversalDeliveryStatus;
+  createdAt: string;
+  sentAt?: string;
+  deliveredAt?: string;
+  provider?: string; // 'resend' | 'gmail' | 'whatsapp_link' | 'tel_protocol' | 'manual_clipboard'
+  providerMessageId?: string;
+  failureReason?: string;
+  attemptCount: number;
+  idempotencyKey: string;
+  attachments?: FollowUpAttachment[];
+}
+
+export interface DeliveryMetrics {
+  emailsSentToday: number;
+  emailsScheduled: number;
+  emailsDelivered: number;
+  emailsFailed: number;
+  whatsappActions: number;
+  callsInitiated: number;
+  followUpsCompleted: number;
+}
 
 export interface FollowUp {
   id: string;
@@ -46,6 +105,10 @@ export interface FollowUp {
   snoozedUntil?: string;
   appointmentTimestamp?: string; // ISO 8601 UTC timestamp format
   appointmentDurationMinutes?: number;
+  scheduledFor?: string;
+  source?: string;
+  sequenceId?: string;
+  sequenceStepId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -61,7 +124,15 @@ export type LeadSource =
   | 'partner'
   | 'other';
 
-export type LeadStatus = 'new' | 'contacted' | 'qualified' | 'proposal_sent' | 'won' | 'lost';
+export type LeadStatus =
+  | 'new'
+  | 'contacted'
+  | 'qualified'
+  | 'proposal'
+  | 'negotiation'
+  | 'won'
+  | 'lost'
+  | 'proposal_sent';
 
 export interface Lead {
   id: string;
@@ -195,14 +266,30 @@ export const PLAN_LIMITS: Record<UserPlan, PlanLimitInfo> = {
 export type AppView =
   | 'landing'
   | 'dashboard'
+  | 'pipeline'
+  | 'crm'
   | 'follow-ups'
   | 'sequences'
   | 'analytics'
   | 'templates'
   | 'contacts'
+  | 'invoices'
+  | 'campaigns'
+  | 'knowledge-base'
+  | 'capture'
   | 'settings'
   | 'billing'
   | 'pricing';
+
+export type TemplateTaskCategory =
+  | 'Proposal Follow-Up'
+  | 'Invoice Recovery'
+  | 'Cold Lead Revival'
+  | 'Appointment Confirmation'
+  | 'Customer Check-In'
+  | 'Feedback Request'
+  | 'Upsell'
+  | 'General Follow-Up';
 
 export type TemplateStage =
   | 'lead_qualification'
@@ -219,9 +306,10 @@ export interface EmailTemplate {
   id: string;
   userId: string;
   title: string;
+  purpose?: string;
   description?: string;
   stage: TemplateStage;
-  category: string;
+  category: TemplateTaskCategory | string;
   channel: FollowUpChannel;
   subject?: string;
   body: string;
@@ -238,7 +326,8 @@ export type ChatActionType =
   | 'create_followup'
   | 'update_followup'
   | 'complete_followup'
-  | 'snooze_followup';
+  | 'snooze_followup'
+  | 'open_composer_template';
 
 export interface ChatPendingAction {
   id: string;
@@ -261,16 +350,42 @@ export interface ChatMessage {
   suggestedPrompts?: string[];
 }
 
+export type TimelineEventType =
+  | 'created'
+  | 'outreach_sent'
+  | 'ai_generated'
+  | 'completed'
+  | 'snoozed'
+  | 'sequence_step'
+  | 'note_added'
+  | 'lead_created'
+  | 'proposal_created'
+  | 'followup_created'
+  | 'email_scheduled'
+  | 'email_sent'
+  | 'email_delivered'
+  | 'email_failed'
+  | 'email_bounced'
+  | 'whatsapp_opened'
+  | 'call_initiated'
+  | 'manual_copied'
+  | 'response_received'
+  | 'invoice_paid'
+  | 'followup_completed';
+
 export interface ContactTimelineEvent {
   id: string;
   contactId: string;
   followUpId?: string;
-  type: 'created' | 'outreach_sent' | 'ai_generated' | 'completed' | 'snoozed' | 'sequence_step' | 'note_added';
+  type: TimelineEventType;
   title: string;
   description?: string;
   channel?: FollowUpChannel;
   amount?: number;
   currency?: string;
+  provider?: string;
+  providerMessageId?: string;
+  deliveryStatus?: UniversalDeliveryStatus;
   timestamp: string;
 }
 
@@ -456,3 +571,64 @@ export interface SmartSummaryResult {
   generatedAt: string;
 }
 
+export type PriorityLevel = 'HIGH PRIORITY' | 'MEDIUM PRIORITY' | 'LOW PRIORITY';
+
+export interface PriorityScoreResult {
+  score: number;
+  level: PriorityLevel;
+  badgeClass: string;
+  breakdown: string[];
+}
+
+export interface SmartActionRecommendation {
+  id: string;
+  followUpId?: string;
+  contactId?: string;
+  contactName: string;
+  contactCompany?: string;
+  actionTitle: string;
+  whyNow: string;
+  whatToDo: string;
+  recommendedChannel: FollowUpChannel;
+  recommendedTone: MessageTone;
+  potentialValue: string;
+  urgency: 'urgent' | 'high' | 'medium';
+  priorityScore: number;
+  priorityLevel: PriorityLevel;
+  scoreBreakdown: string[];
+  type?: FollowUpType | string;
+  dueDate?: string;
+  recommendedMessageHook?: string;
+}
+
+export interface DailyRevenueBrief {
+  headline: string;
+  overview: string;
+  hasInsufficientData: boolean;
+  insufficientDataReason?: string;
+
+  // Real aggregated metric counters
+  moneyAtRisk: number; // overdue invoices + cold leads + past-due proposals
+  outstanding: number; // overdue or pending unpaid invoices
+  totalAtStake: number;
+  currency: string;
+
+  // Real data categories identified by Flow
+  followUpsDueToday: FollowUp[];
+  overdueInvoices: FollowUp[];
+  unansweredProposals: FollowUp[];
+  coldLeads: Lead[];
+  highValueOpportunities: FollowUp[];
+  upcomingAppointments: Appointment[];
+  completedFollowUps: FollowUp[];
+  recentlyReceivedResponses: any[];
+
+  // Primary Returns required
+  todaysPriorities: SmartActionRecommendation[];
+  mostImportantAction: SmartActionRecommendation | null;
+  opportunitiesRequiringAttention: SmartActionRecommendation[];
+
+  tacticalAdvice: string;
+  generatedAt: string;
+}// Re-export Unified Business OS types
+export * from './types/businessOs';

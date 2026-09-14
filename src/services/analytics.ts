@@ -1,5 +1,5 @@
 import { doc, setDoc, collection } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db, auth } from '../lib/firebase';
 import type { AnalyticsEvent } from '../types';
 
 export const trackEvent = async (
@@ -20,12 +20,13 @@ export const trackEvent = async (
       console.log(`[FollowFlow Analytics] ${eventName}:`, properties);
     }
 
-    if (userId) {
+    // Only write to Firestore if user is genuinely authenticated and matches the record owner
+    if (userId && auth.currentUser && auth.currentUser.uid === userId) {
       const eventRef = doc(collection(db, `users/${userId}/analytics`));
       await setDoc(eventRef, event);
     }
   } catch (error) {
     // Analytics failure should never break UI workflows
-    console.warn('[Analytics] Failed to record event:', error);
+    console.warn('[Analytics] Notice:', error);
   }
 };

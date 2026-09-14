@@ -255,6 +255,7 @@ export const AnalyticsView: React.FC = () => {
 
   // Fetch AI Strategic Insights
   const fetchAiRecommendations = async () => {
+    if (totalFollowUps === 0) return;
     setIsLoadingRecommendations(true);
     try {
       const topCh = channelData.sort((a, b) => b.conversionRate - a.conversionRate)[0]?.name || 'WhatsApp';
@@ -283,8 +284,10 @@ export const AnalyticsView: React.FC = () => {
 
   useEffect(() => {
     // Initial load recommendations
-    fetchAiRecommendations();
-  }, []);
+    if (totalFollowUps > 0) {
+      fetchAiRecommendations();
+    }
+  }, [totalFollowUps]);
 
   const handleExportCSV = () => {
     const headers = ['FollowUp Title', 'Contact', 'Type', 'Channel', 'Amount', 'Status', 'Due Date'];
@@ -416,6 +419,23 @@ export const AnalyticsView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Insufficient data state */}
+      {totalFollowUps === 0 && (
+        <div className="p-6 rounded-2xl bg-amber-50/70 border border-amber-200 text-amber-900 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="p-2 bg-amber-100 rounded-xl text-amber-700 shrink-0 mt-0.5">
+              <Info className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-amber-950">Not enough data yet</h3>
+              <p className="text-xs text-amber-800/90 mt-0.5 max-w-xl">
+                Analytics, win rates, and channel conversions calculate strictly from real follow-up activities. Log your contacts and complete your first follow-ups to populate live pipeline trends.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* KPI HERO CARDS */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">

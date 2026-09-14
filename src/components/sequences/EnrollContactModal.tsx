@@ -91,10 +91,13 @@ export const EnrollContactModal: React.FC<EnrollContactModalProps> = ({
         nextDueDate = nextDate.toISOString().split('T')[0];
       }
 
-      const channelToUse =
+      const channelToUse: FollowUpChannel =
         customChannel !== 'auto'
-          ? customChannel
-          : (firstStep.channel as FollowUpChannel) || selectedContact.preferredChannel || 'email';
+          ? (customChannel as FollowUpChannel)
+          : (firstStep.channel as FollowUpChannel) ||
+            (selectedContact.preferredChannel && selectedContact.preferredChannel !== 'no_preference'
+              ? (selectedContact.preferredChannel as FollowUpChannel)
+              : 'email');
 
       await enrollContact({
         sequenceId: selectedSequence.id,

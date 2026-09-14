@@ -23,6 +23,7 @@ import {
   Phone,
   HelpCircle,
   X,
+  ExternalLink,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useFollowUp } from '../../context/FollowUpContext';
@@ -62,7 +63,7 @@ const AVAILABLE_VARIABLES = [
 
 export const TemplatesView: React.FC = () => {
   const { user, userProfile } = useAuth();
-  const { contacts } = useFollowUp();
+  const { contacts, openAiModal } = useFollowUp();
   const { success, error: toastError } = useToast();
 
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
@@ -120,7 +121,31 @@ export const TemplatesView: React.FC = () => {
     );
 
     return () => unsub();
-  }, [user]);
+  }, [user?.uid]);
+
+  // Deep-linking: Support opening specific templates directly from URL parameters or new windows
+  useEffect(() => {
+    if (templates.length === 0) return;
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      let targetId = searchParams.get('templateId') || searchParams.get('template');
+      if (!targetId && window.location.hash.includes('templateId=')) {
+        const hashQuery = window.location.hash.split('?')[1];
+        if (hashQuery) {
+          const hashParams = new URLSearchParams(hashQuery);
+          targetId = hashParams.get('templateId');
+        }
+      }
+      if (targetId) {
+        const targetTmpl = templates.find((t) => t.id === targetId);
+        if (targetTmpl) {
+          setPreviewTemplate(targetTmpl);
+        }
+      }
+    } catch (err) {
+      console.warn('[TemplatesView] URL deep linking check notice:', err);
+    }
+  }, [templates]);
 
   // Categories list
   const categories = useMemo(() => {
@@ -262,13 +287,34 @@ export const TemplatesView: React.FC = () => {
     }
   };
 
-  // Helper to replace variables in preview
-  const getRenderedContent = (template: EmailTemplate) => {
-    const contact = contacts.find((c) => c.id === selectedTestContactId);
-    let renderedSubject = template.subject;
-    let renderedBody = template.body;
+  const handleUseTemplate = (tmpl: EmailTemplate, targetContact?: Contact) => {
+    const contact =
+      targetContact ||
+      contacts.find((c) => c.id === selectedTestContactId) ||
+      (contacts.length > 0 ? contacts[0] : undefined);
 
-    const myName = userProfile?.displayName || '{{my_name}}';
+    openAiModal(undefined, contact, {
+      subject: tmpl.subject,
+      message: tmpl.body,
+      channel: tmpl.channel || 'email',
+      tone: 'professional',
+      category: tmpl.category,
+    });
+    if (user && tmpl.id) {
+      incrementTemplateUsage(user.uid, tmpl.id).catch(() => {});
+    }
+  };
+
+  // Helper to replace variables in preview defensively
+  const getRenderedContent = (template: EmailTemplate | null | undefined) => {
+    if (!template) {
+      return { renderedSubject: '', renderedBody: '', contact: null };
+    }
+    const contact = contacts.find((c) => c.id === selectedTestContactId);
+    let renderedSubject = template.subject || '';
+    let renderedBody = template.body || '';
+
+    const myName = userProfile?.displayName || user?.displayName || '{{my_name}}';
     const contactName = contact?.name || '{{contact_name}}';
     const company = contact?.company || '{{company}}';
     const amount = '{{amount}}';
@@ -288,12 +334,21 @@ export const TemplatesView: React.FC = () => {
       '{{project_name}}': projectName,
       '{{invoice_number}}': invoiceNumber,
       '{{pain_point}}': painPoint,
+      '{{name}}': contactName,
     };
 
-    Object.entries(replacements).forEach(([k, val]) => {
-      renderedSubject = renderedSubject.split(k).join(val);
-      renderedBody = renderedBody.split(k).join(val);
-    });
+    try {
+      Object.entries(replacements).forEach(([k, val]) => {
+        if (typeof renderedSubject === 'string' && renderedSubject.includes(k)) {
+          renderedSubject = renderedSubject.split(k).join(val || '');
+        }
+        if (typeof renderedBody === 'string' && renderedBody.includes(k)) {
+          renderedBody = renderedBody.split(k).join(val || '');
+        }
+      });
+    } catch (err) {
+      console.warn('[TemplatesView] Variable substitution notice:', err);
+    }
 
     return { renderedSubject, renderedBody, contact };
   };
@@ -433,7 +488,10 @@ export const TemplatesView: React.FC = () => {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filteredTemplates.map((tmpl) => {
-            const stageMeta = STAGE_LABELS[tmpl.stage] || STAGE_LABELS.general;
+            const stageMeta = (tmpl?.stage && STAGE_LABELS[tmpl.stage]) || STAGE_LABELS?.general || {
+              label: 'General Follow-Up',
+              badgeColor: 'bg-slate-50 text-slate-700 border-slate-200',
+            };
             return (
               <div
                 key={tmpl.id}
@@ -504,6 +562,19 @@ export const TemplatesView: React.FC = () => {
                     >
                       <Eye className="w-4 h-4" />
                     </button>
+                    <button
+                      onClick={() => {
+                        const url = `${window.location.origin}${window.location.pathname}#templates?templateId=${tmpl.id}`;
+                        if (navigator.clipboard) {
+                          navigator.clipboard.writeText(url);
+                          success('Direct link copied to clipboard!');
+                        }
+                      }}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                      title="Copy direct link for this template"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                    </button>
                     {!tmpl.isDefault && (
                       <>
                         <button
@@ -524,22 +595,26 @@ export const TemplatesView: React.FC = () => {
                     )}
                   </div>
 
-                  <button
-                    onClick={() => handleCopyScript(tmpl)}
-                    className="py-1.5 px-3 rounded-xl bg-slate-900 hover:bg-blue-600 text-white text-xs font-bold shadow-2xs transition-all flex items-center gap-1.5"
-                  >
-                    {copiedId === tmpl.id ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-300" />
-                        <span>Copied</span>
-                      </>
-                    ) : (
-                      <>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => handleCopyScript(tmpl)}
+                      className="p-1.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-100 text-xs font-semibold transition-colors"
+                      title="Copy script"
+                    >
+                      {copiedId === tmpl.id ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      ) : (
                         <Copy className="w-3.5 h-3.5" />
-                        <span>Copy Script</span>
-                      </>
-                    )}
-                  </button>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => handleUseTemplate(tmpl)}
+                      className="py-1.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-xs transition-all flex items-center gap-1.5"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>Use Template</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -616,10 +691,21 @@ export const TemplatesView: React.FC = () => {
                       onClick={() => {
                         handleCopyScript(previewTemplate, `${renderedSubject ? `Subject: ${renderedSubject}\n\n` : ''}${renderedBody}`);
                       }}
+                      className="px-3.5 py-2 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-100 text-xs font-semibold flex items-center gap-1.5"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      Copy Script
+                    </button>
+                    <button
+                      onClick={() => {
+                        const tmpl = previewTemplate;
+                        setPreviewTemplate(null);
+                        handleUseTemplate(tmpl);
+                      }}
                       className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs"
                     >
-                      <Copy className="w-4 h-4" />
-                      Copy Populated Script
+                      <Send className="w-4 h-4" />
+                      Use in Composer
                     </button>
                   </div>
                 </div>

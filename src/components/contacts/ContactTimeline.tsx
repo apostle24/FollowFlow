@@ -11,6 +11,10 @@ import {
   User,
   MessageSquare,
   DollarSign,
+  Mail,
+  Phone,
+  Copy,
+  AlertCircle,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { subscribeToContactTimeline, logTimelineEvent } from '../../services/db';
@@ -69,6 +73,21 @@ export const ContactTimeline: React.FC<ContactTimelineProps> = ({ contact }) => 
 
   const getEventIcon = (type: ContactTimelineEvent['type']) => {
     switch (type) {
+      case 'email_delivered':
+        return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />;
+      case 'email_sent':
+        return <Mail className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />;
+      case 'email_scheduled':
+        return <Clock className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />;
+      case 'email_failed':
+      case 'email_bounced':
+        return <AlertCircle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />;
+      case 'whatsapp_opened':
+        return <MessageSquare className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />;
+      case 'call_initiated':
+        return <Phone className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />;
+      case 'manual_copied':
+        return <Copy className="w-3.5 h-3.5 text-slate-600 dark:text-slate-400" />;
       case 'created':
         return <User className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />;
       case 'outreach_sent':
@@ -76,6 +95,7 @@ export const ContactTimeline: React.FC<ContactTimelineProps> = ({ contact }) => 
       case 'ai_generated':
         return <Sparkles className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />;
       case 'completed':
+      case 'followup_completed':
         return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />;
       case 'snoozed':
         return <Calendar className="w-3.5 h-3.5 text-orange-600 dark:text-orange-400" />;
@@ -85,6 +105,31 @@ export const ContactTimeline: React.FC<ContactTimelineProps> = ({ contact }) => 
       default:
         return <FileText className="w-3.5 h-3.5 text-stone-600 dark:text-stone-400" />;
     }
+  };
+
+  const getEventBadge = (ev: ContactTimelineEvent) => {
+    if (ev.type === 'email_delivered') {
+      return <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Delivered ✓</span>;
+    }
+    if (ev.type === 'email_sent') {
+      return <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">Sent Email</span>;
+    }
+    if (ev.type === 'email_scheduled') {
+      return <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">Scheduled</span>;
+    }
+    if (ev.type === 'email_failed' || ev.type === 'email_bounced') {
+      return <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200">Failed</span>;
+    }
+    if (ev.type === 'whatsapp_opened') {
+      return <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">WhatsApp</span>;
+    }
+    if (ev.type === 'call_initiated') {
+      return <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200">Phone Call</span>;
+    }
+    if (ev.type === 'manual_copied') {
+      return <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200">Copied</span>;
+    }
+    return null;
   };
 
   const formatEventDate = (timestamp: string) => {
@@ -150,9 +195,12 @@ export const ContactTimeline: React.FC<ContactTimelineProps> = ({ contact }) => 
 
               <div className="bg-stone-50/70 dark:bg-stone-800/40 hover:bg-stone-50 dark:hover:bg-stone-800/70 rounded-xl p-3 border border-stone-200/60 dark:border-stone-800 transition-colors">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-medium text-stone-800 dark:text-stone-200">
-                    {ev.title}
-                  </span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-medium text-stone-800 dark:text-stone-200">
+                      {ev.title}
+                    </span>
+                    {getEventBadge(ev)}
+                  </div>
                   <span className="text-[10px] text-stone-400 whitespace-nowrap">
                     {formatEventDate(ev.timestamp)}
                   </span>
@@ -162,6 +210,12 @@ export const ContactTimeline: React.FC<ContactTimelineProps> = ({ contact }) => 
                   <p className="text-xs text-stone-600 dark:text-stone-400 mt-1 whitespace-pre-wrap">
                     {ev.description}
                   </p>
+                )}
+
+                {ev.providerMessageId && (
+                  <div className="mt-1.5 text-[10px] font-mono text-slate-400 flex items-center gap-1">
+                    <span>Provider ID: {ev.providerMessageId}</span>
+                  </div>
                 )}
 
                 {ev.amount && (

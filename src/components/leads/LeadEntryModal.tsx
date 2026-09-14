@@ -26,6 +26,7 @@ interface LeadEntryModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialLead?: Partial<Lead> | null;
+  onScheduleAppointment?: (lead: Lead | Partial<Lead>) => void;
 }
 
 const LEAD_SOURCE_OPTIONS: { value: LeadSource; label: string; icon: string }[] = [
@@ -142,7 +143,7 @@ export const LeadEntryModal: React.FC<LeadEntryModalProps> = ({
           notes: notes.trim() || undefined,
           appointmentTimestamp: scheduleAppointmentNow ? appointmentTimestamp : undefined,
         });
-        success('Lead updated', 'Changes synchronized directly to Firestore.');
+        success('Lead updated', 'Lead details updated successfully.');
       } else {
         await addLead({
           name: name.trim(),
@@ -158,13 +159,13 @@ export const LeadEntryModal: React.FC<LeadEntryModalProps> = ({
           appointmentTimestamp: scheduleAppointmentNow ? appointmentTimestamp : undefined,
         });
         success(
-          'Lead saved to Firestore',
-          `Contact details, ${leadSource} source, and ${currency}${parsedValue.toLocaleString()} deal value recorded.`
+          'Lead created successfully',
+          `Contact details and ${parsedValue > 0 ? `${currency}${parsedValue.toLocaleString()} ` : ''}deal value recorded.`
         );
       }
       onClose();
     } catch (err: any) {
-      toastError(err.message || 'Failed to save lead directly to Firestore');
+      toastError(err.message || 'Failed to save lead. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -184,7 +185,7 @@ export const LeadEntryModal: React.FC<LeadEntryModalProps> = ({
                 {initialLead?.id ? 'Edit Client Lead' : 'New Lead Entry'}
               </h2>
               <p className="text-xs text-slate-500">
-                Saves client contact details, source, and deal value directly to Firestore.
+                Record client contact details, source channel, and pipeline deal value.
               </p>
             </div>
           </div>
@@ -378,7 +379,7 @@ export const LeadEntryModal: React.FC<LeadEntryModalProps> = ({
                 <DateTimePicker
                   value={appointmentTimestamp}
                   onChange={(iso) => setAppointmentTimestamp(iso)}
-                  label="Appointment Timestamp (Stored in Firebase)"
+                  label="Appointment Date & Time"
                   required
                 />
               </div>
@@ -414,11 +415,11 @@ export const LeadEntryModal: React.FC<LeadEntryModalProps> = ({
               className="px-6 py-2.5 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 rounded-xl transition-colors shadow-sm disabled:opacity-50 flex items-center gap-2"
             >
               {loading ? (
-                <span>Saving to Firestore...</span>
+                <span>Saving Lead...</span>
               ) : (
                 <>
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>{initialLead?.id ? 'Update Lead' : 'Save Lead to Firestore'}</span>
+                  <span>{initialLead?.id ? 'Update Lead' : 'Save Lead'}</span>
                 </>
               )}
             </button>

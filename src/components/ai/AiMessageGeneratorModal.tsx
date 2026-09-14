@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useFollowUp } from '../../context/FollowUpContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../common/Toast';
@@ -9,8 +9,14 @@ import {
   getEmailConfig,
   sendDirectEmail,
   scheduleEmail,
+  logDeliveryAction,
   type EmailConfig,
 } from '../../services/email';
+import {
+  sendEmailViaGmail,
+  createGmailDraft,
+  isUnauthorizedDomainError,
+} from '../../services/gmail';
 import {
   Sparkles,
   X,
@@ -23,6 +29,8 @@ import {
   Edit3,
   ExternalLink,
   AlertCircle,
+  AlertTriangle,
+  TestTube2,
   Phone,
   Calendar,
   Clock,
@@ -30,16 +38,31 @@ import {
   FileText,
   Tag,
   Wand2,
+  Paperclip,
+  Trash2,
+  CheckCheck,
+  FileCheck,
 } from 'lucide-react';
 import type { MessageTone, FollowUpChannel, Contact, FollowUp } from '../../types';
 import { ContactSelector, type TemporaryContact, type ExtraContactDetails } from './ContactSelector';
 
 export const AiMessageGeneratorModal: React.FC = () => {
-  const { user, userProfile, incrementAiUsage } = useAuth();
+  const {
+    user,
+    userProfile,
+    incrementAiUsage,
+    isGmailConnected,
+    isGmailPreviewMode,
+    gmailUserEmail,
+    connectGmail,
+    enablePreviewGmail,
+    gmailAccessToken,
+  } = useAuth();
   const {
     aiModalOpen,
     aiTargetFollowUp,
     aiTargetContact,
+    aiInitialTemplate,
     closeAiModal,
     contacts,
     followUps,
@@ -47,6 +70,9 @@ export const AiMessageGeneratorModal: React.FC = () => {
     openUpgradeModal,
     addContact,
     editContact,
+    aiDraft,
+    updateAiDraft,
+    generateAiFollowUpMessage,
   } = useFollowUp();
   const { success, error: toastError, info } = useToast();
 
@@ -76,20 +102,49 @@ export const AiMessageGeneratorModal: React.FC = () => {
     fromEmail: '',
   });
   const [isSendingDirectEmail, setIsSendingDirectEmail] = useState<boolean>(false);
+  const [isSendingViaGmail, setIsSendingViaGmail] = useState<boolean>(false);
+  const [isCreatingDraft, setIsCreatingDraft] = useState<boolean>(false);
   const [isSchedulingEmail, setIsSchedulingEmail] = useState<boolean>(false);
   const [showSchedulePicker, setShowSchedulePicker] = useState<boolean>(false);
   const [customScheduleDate, setCustomScheduleDate] = useState<string>('');
   const [customScheduleTime, setCustomScheduleTime] = useState<string>('09:00');
+  const [unauthorizedDomainNotice, setUnauthorizedDomainNotice] = useState<{
+    domain: string;
+    isOpen: boolean;
+  } | null>(null);
+  const [copiedDomain, setCopiedDomain] = useState<boolean>(false);
+
+  // Multi-Channel attachments & real delivery receipt
+  const [attachments, setAttachments] = useState<
+    Array<{ filename: string; content: string; mimeType: string; size: number }>
+  >([]);
+  const [deliveryReceipt, setDeliveryReceipt] = useState<{
+    channel: string;
+    recipient: string;
+    sentAt: string;
+    status: string;
+    providerMessageId?: string;
+    details?: string;
+  } | null>(null);
+  const [callNotes, setCallNotes] = useState<string>('');
+  const [improvingWithAi, setImprovingWithAi] = useState<boolean>(false);
 
   // Load email configuration on mount
   useEffect(() => {
     getEmailConfig().then(setEmailConfig).catch(() => {});
   }, []);
 
+  // Track open state transition to prevent background re-renders or updates from wiping generated text
+  const prevOpenRef = useRef<boolean>(false);
+
   // Sync state when modal opens with target follow-up / contact
   useEffect(() => {
-    if (aiModalOpen) {
+    if (aiModalOpen && !prevOpenRef.current) {
+      prevOpenRef.current = true;
       getEmailConfig().then(setEmailConfig).catch(() => {});
+      setAttachments([]);
+      setDeliveryReceipt(null);
+      setCallNotes('');
 
       if (aiTargetContact) {
         setSelectedContactId(aiTargetContact.id);
@@ -107,30 +162,74 @@ export const AiMessageGeneratorModal: React.FC = () => {
 
       if (aiTargetFollowUp) {
         setSelectedFollowUpId(aiTargetFollowUp.id);
-        setChannel(aiTargetFollowUp.channel || 'whatsapp');
+        const ch = aiTargetFollowUp.channel || 'whatsapp';
+        setChannel(ch);
         if (aiTargetFollowUp.description) {
           setContextInput(aiTargetFollowUp.description);
         }
+        if (ch === 'email') {
+          setSubject(aiTargetFollowUp.title ? `Following up on ${aiTargetFollowUp.title}` : 'Quick follow-up');
+        } else {
+          setSubject('');
+        }
       } else {
         setSelectedFollowUpId('');
+        if (aiTargetContact?.name) {
+          setSubject(`Following up with ${aiTargetContact.name}`);
+        } else {
+          setSubject('Quick follow-up');
+        }
       }
 
       setExtraContextDetails(null);
-      setMessageText('');
-      setSubject('');
       setCopied(false);
       setEditMode(false);
       setShowSchedulePicker(false);
-      setComposerMode('ai');
       setMissingNumberInput('');
       setMissingEmailInput('');
+
+      if (aiInitialTemplate) {
+        setComposerMode('manual');
+        if (aiInitialTemplate.channel) setChannel(aiInitialTemplate.channel);
+        if (aiInitialTemplate.tone) setTone(aiInitialTemplate.tone);
+        if (aiInitialTemplate.subject) setSubject(aiInitialTemplate.subject);
+        if (aiInitialTemplate.message) setMessageText(aiInitialTemplate.message);
+      } else if (aiDraft && aiDraft.messageText) {
+        // Restore existing draft to prevent user text disappearance
+        setComposerMode('manual');
+        setMessageText(aiDraft.messageText);
+        if (aiDraft.subject) setSubject(aiDraft.subject);
+        if (aiDraft.channel) setChannel(aiDraft.channel);
+        if (aiDraft.tone) setTone(aiDraft.tone);
+        if (aiDraft.contextInput) setContextInput(aiDraft.contextInput);
+      } else {
+        setComposerMode('ai');
+        setMessageText('');
+      }
 
       // Default custom schedule date to tomorrow
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       setCustomScheduleDate(tomorrow.toISOString().split('T')[0]);
+    } else if (!aiModalOpen) {
+      prevOpenRef.current = false;
     }
-  }, [aiModalOpen, aiTargetFollowUp, aiTargetContact, contacts]);
+  }, [aiModalOpen, aiTargetFollowUp, aiTargetContact, aiInitialTemplate]);
+
+  // Keep persistent AI draft in sync with current text to protect user progress during re-renders
+  useEffect(() => {
+    if (aiModalOpen && (messageText || subject || contextInput)) {
+      updateAiDraft({
+        messageText,
+        subject,
+        channel,
+        tone,
+        contextInput,
+        contactId: selectedContactId,
+        followUpId: selectedFollowUpId,
+      });
+    }
+  }, [aiModalOpen, messageText, subject, channel, tone, contextInput, selectedContactId, selectedFollowUpId]);
 
   if (!aiModalOpen) return null;
 
@@ -203,6 +302,8 @@ export const AiMessageGeneratorModal: React.FC = () => {
       // Common convenience synonyms
       '{{name}}': contactName,
       '{{company}}': companyName,
+      '{{invoice_number}}': currentFollowUp?.id ? `INV-${currentFollowUp.id.slice(-5).toUpperCase()}` : 'INV-001',
+      '{{pain_point}}': 'operational efficiency',
     };
 
     for (const [tag, val] of Object.entries(map)) {
@@ -373,45 +474,24 @@ export const AiMessageGeneratorModal: React.FC = () => {
         combinedContext += ` Notes: ${currentContact.notes}.`;
       }
 
-      const result = await generateFollowUpMessage({
-        contact: currentContact,
-        followUp: currentFollowUp || (extraContextDetails?.amount != null ? {
+      const result = await generateAiFollowUpMessage({
+        contact: currentContact as Contact,
+        followUp: currentFollowUp || (extraContextDetails?.amount != null ? ({
           title: extraContextDetails.project || 'Proposal follow-up',
           amount: extraContextDetails.amount,
           currency: extraContextDetails.currency || '$',
-        } : undefined),
+        } as any) : undefined),
         tone,
         channel,
         additionalContext: combinedContext,
-        userId: user?.uid,
+        project: extraContextDetails?.project,
+        amount: extraContextDetails?.amount,
+        currency: extraContextDetails?.currency || '$',
       });
 
-      setSubject(result.subject || '');
+      setSubject(result.subject);
       setMessageText(result.message);
-      await incrementAiUsage();
-
-      // Only log saved contacts to permanent database history
-      if (user && !('isTemporary' in currentContact && currentContact.isTemporary)) {
-        await logGeneratedMessage(user.uid, {
-          followUpId: currentFollowUp?.id,
-          contactId: currentContact.id,
-          contactName: currentContact.name,
-          tone,
-          channel,
-          context: combinedContext,
-          subject: result.subject,
-          generatedContent: result.message,
-          finalContent: result.message,
-        });
-
-        await trackEvent('ai_message_generated', user.uid, {
-          tone,
-          channel,
-          contactId: currentContact.id,
-          followUpId: currentFollowUp?.id,
-        });
-      }
-
+      setComposerMode('manual');
       success('Message generated!', 'Review, edit, or dispatch directly.');
     } catch (err: any) {
       const errMsg = err.message || 'Failed to generate message. Please try again.';
@@ -424,8 +504,88 @@ export const AiMessageGeneratorModal: React.FC = () => {
       setGenerating(false);
     }
   };
+ 
+  const handleImproveWithAi = async () => {
+    if (!messageText.trim()) {
+      toastError('Draft or paste some text first before improving with AI.');
+      return;
+    }
+    setImprovingWithAi(true);
+    try {
+      const instruction = `Improve this follow-up message to sound more concise, compelling, and effective. Preserve key facts and variables. Tone: ${tone}. Channel: ${channel}. Message:\n${messageText}`;
+      const contactObj = currentContact || {
+        id: 'c-temp',
+        userId: user?.uid || '',
+        name: currentFollowUp?.contactName || 'Contact',
+        company: currentFollowUp?.contactCompany,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const result = await generateFollowUpMessage({
+        contact: contactObj,
+        followUp: currentFollowUp || undefined,
+        tone,
+        channel,
+        additionalContext: instruction,
+        userId: user?.uid,
+        isPro: userProfile?.plan === 'pro',
+        currentCount: userProfile?.aiGenerationsCount || 0,
+      });
 
-  const handleCopy = () => {
+      if (result.message) {
+        setMessageText(result.message);
+        if (result.subject && channel === 'email') {
+          setSubject(result.subject);
+        }
+        await incrementAiUsage();
+        success('Message polished with AI!', 'Refined for tone, clarity, and higher response rate.');
+      }
+    } catch (err: any) {
+      const errMsg = err.message || 'Failed to polish message with AI.';
+      if (errMsg.toLowerCase().includes('limit reached') || errMsg.toLowerCase().includes('upgrade')) {
+        openUpgradeModal(errMsg);
+      } else {
+        toastError(errMsg);
+      }
+    } finally {
+      setImprovingWithAi(false);
+    }
+  };
+
+  // File attachment handling
+  const handleAttachmentUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    Array.from(files).forEach((file: File) => {
+      if (file.size > 10 * 1024 * 1024) {
+        toastError(`File "${file.name}" exceeds 10MB limit.`);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        const base64 = result.split(',')[1] || '';
+        setAttachments((prev) => [
+          ...prev,
+          {
+            filename: file.name,
+            content: base64,
+            mimeType: file.type || 'application/octet-stream',
+            size: file.size,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = '';
+  };
+
+  const handleRemoveAttachment = (index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleCopy = async () => {
     const resolvedSubj = resolveMessageVariables(subject);
     const resolvedBody = resolveMessageVariables(messageText);
     setSubject(resolvedSubj);
@@ -434,11 +594,44 @@ export const AiMessageGeneratorModal: React.FC = () => {
     const textToCopy = channel === 'email' && resolvedSubj ? `Subject: ${resolvedSubj}\n\n${resolvedBody}` : resolvedBody;
     navigator.clipboard.writeText(textToCopy);
     setCopied(true);
+
+    if (user && currentContact && !('isTemporary' in currentContact && currentContact.isTemporary)) {
+      try {
+        await logDeliveryAction({
+          userId: user.uid,
+          contactId: currentContact.id,
+          followUpId: currentFollowUp?.id,
+          channel: 'manual',
+          type: 'manual_copied',
+          title: `Manual Follow-Up Copied for ${currentContact.name}`,
+          description: `Message copied: "${resolvedBody.slice(0, 90)}${resolvedBody.length > 90 ? '...' : ''}"`,
+          recipient: currentContact.name,
+        });
+      } catch (e) {
+        console.warn('Failed to log manual delivery action:', e);
+      }
+    }
+
+    if (currentFollowUp && user) {
+      await updateFollowUp(user.uid, currentFollowUp.id, {
+        status: 'contacted',
+        lastContactedAt: new Date().toISOString(),
+      });
+    }
+
+    setDeliveryReceipt({
+      channel: 'MANUAL/COPY',
+      recipient: currentContact ? currentContact.name : 'Selected Recipient',
+      sentAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      status: 'Copied to Clipboard',
+      details: 'Follow-up text copied and logged to timeline. Ready to paste.',
+    });
+
     info('Copied to clipboard (variables resolved)');
     setTimeout(() => setCopied(false), 2500);
   };
 
-  const handleOpenWhatsApp = () => {
+  const handleOpenWhatsApp = async () => {
     if (!currentContact) {
       toastError('Please select a contact');
       return;
@@ -457,11 +650,93 @@ export const AiMessageGeneratorModal: React.FC = () => {
     const encodedText = encodeURIComponent(resolvedBody);
     const whatsappUrl = `https://wa.me/${sanitizedNumber}?text=${encodedText}`;
 
+    // Open WhatsApp Web or App directly
+    window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
+
     if (user && !('isTemporary' in currentContact && currentContact.isTemporary)) {
       trackEvent('whatsapp_opened', user.uid, { contactId: currentContact.id });
+      try {
+        await logDeliveryAction({
+          userId: user.uid,
+          contactId: currentContact.id,
+          followUpId: currentFollowUp?.id,
+          channel: 'whatsapp',
+          type: 'whatsapp_opened',
+          title: `WhatsApp Dispatched to ${currentContact.name}`,
+          description: `Message: "${resolvedBody.slice(0, 90)}${resolvedBody.length > 90 ? '...' : ''}"`,
+          recipient: `${currentContact.name} (${phone})`,
+        });
+      } catch (e) {
+        console.warn('Failed to log WhatsApp delivery action:', e);
+      }
     }
 
-    window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
+    if (currentFollowUp && user) {
+      await updateFollowUp(user.uid, currentFollowUp.id, {
+        status: 'contacted',
+        lastContactedAt: new Date().toISOString(),
+      });
+    }
+
+    setDeliveryReceipt({
+      channel: 'WHATSAPP',
+      recipient: `${currentContact.name} (${phone})`,
+      sentAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      status: 'Dispatched to WhatsApp',
+      details: 'Direct wa.me protocol triggered and logged in contact timeline.',
+    });
+
+    success('WhatsApp opened!', `Follow-up dispatched to ${currentContact.name}`);
+  };
+
+  const handleCallInitiation = async () => {
+    if (!currentContact) {
+      toastError('Please select a contact');
+      return;
+    }
+    const phone = currentContact.phone || currentContact.whatsapp;
+    if (!phone) {
+      toastError('Add a phone number to continue.');
+      return;
+    }
+
+    const sanitizedNumber = phone.replace(/[^\d+]/g, '');
+    window.location.href = `tel:${sanitizedNumber}`;
+
+    if (user && !('isTemporary' in currentContact && currentContact.isTemporary)) {
+      trackEvent('call_initiated', user.uid, { contactId: currentContact.id });
+      try {
+        await logDeliveryAction({
+          userId: user.uid,
+          contactId: currentContact.id,
+          followUpId: currentFollowUp?.id,
+          channel: 'phone',
+          type: 'call_initiated',
+          title: `Phone Call Initiated to ${currentContact.name}`,
+          description: callNotes ? `Notes: ${callNotes}` : `Direct call dialed to ${phone}`,
+          recipient: `${currentContact.name} (${phone})`,
+        });
+      } catch (e) {
+        console.warn('Failed to log call delivery action:', e);
+      }
+    }
+
+    if (currentFollowUp && user) {
+      await updateFollowUp(user.uid, currentFollowUp.id, {
+        status: 'contacted',
+        lastContactedAt: new Date().toISOString(),
+      });
+    }
+
+    setDeliveryReceipt({
+      channel: 'PHONE/CALL',
+      recipient: `${currentContact.name} (${phone})`,
+      sentAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      status: 'Call Initiated',
+      details: callNotes ? `Logged with notes: "${callNotes}"` : 'Tel dialer protocol launched and recorded.',
+    });
+
+    success('Call dialed!', `Follow-up logged for ${currentContact.name}`);
   };
 
   const handleOpenEmail = () => {
@@ -489,7 +764,63 @@ export const AiMessageGeneratorModal: React.FC = () => {
       trackEvent('email_opened', user.uid, { contactId: currentContact.id });
     }
 
-    window.open(mailtoUrl, '_blank');
+    // Trigger mail client safely in-page without creating a blank "Untitled" window
+    const link = document.createElement('a');
+    link.href = mailtoUrl;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      try {
+        document.body.removeChild(link);
+      } catch {}
+    }, 250);
+    success('Launching email client...');
+  };
+
+  const handleOpenGmailWeb = () => {
+    if (!currentContact) {
+      toastError('Please select a contact');
+      return;
+    }
+    const email = currentContact.email;
+    if (!email) {
+      toastError('Add an email address to continue.');
+      return;
+    }
+
+    const resolvedSubj = resolveMessageVariables(
+      subject || (currentFollowUp?.title ? `Following up on ${currentFollowUp.title}` : 'Following up')
+    );
+    const resolvedBody = resolveMessageVariables(messageText);
+
+    setSubject(resolvedSubj);
+    setMessageText(resolvedBody);
+
+    if (user && !('isTemporary' in currentContact && currentContact.isTemporary)) {
+      trackEvent('email_opened', user.uid, { contactId: currentContact.id, provider: 'gmail_web' });
+    }
+
+    const webGmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email)}&su=${encodeURIComponent(resolvedSubj)}&body=${encodeURIComponent(resolvedBody)}`;
+    window.open(webGmailUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleSendWithPreviewSandbox = () => {
+    const email = user?.email || userProfile?.email || 'founder@business.com';
+    enablePreviewGmail(email);
+    setUnauthorizedDomainNotice(null);
+    info('Preview Sandbox Activated', `Using ${email} in sandbox mode. Dispatching now...`);
+    setTimeout(() => {
+      handleSendViaGmail();
+    }, 150);
+  };
+
+  const handleCopyModalDomain = () => {
+    const domain = unauthorizedDomainNotice?.domain || (typeof window !== 'undefined' ? window.location.hostname : '');
+    if (domain) {
+      navigator.clipboard.writeText(domain);
+      setCopiedDomain(true);
+      setTimeout(() => setCopiedDomain(false), 2500);
+    }
   };
 
   // Direct server-side real email delivery
@@ -498,13 +829,15 @@ export const AiMessageGeneratorModal: React.FC = () => {
       toastError('Add an email address to continue.');
       return;
     }
-    const resolvedSubj = resolveMessageVariables(subject.trim());
+    const defaultSubj = currentFollowUp?.title
+      ? `Following up on ${currentFollowUp.title}`
+      : currentContact?.name
+      ? `Following up with ${currentContact.name}`
+      : 'Quick follow-up';
+    const effectiveSubj = subject.trim() || defaultSubj;
+    const resolvedSubj = resolveMessageVariables(effectiveSubj);
     const resolvedBody = resolveMessageVariables(messageText.trim());
 
-    if (!resolvedSubj) {
-      toastError('Please enter an email subject line.');
-      return;
-    }
     if (!resolvedBody) {
       toastError('Please enter message text before sending.');
       return;
@@ -524,9 +857,24 @@ export const AiMessageGeneratorModal: React.FC = () => {
         subject: resolvedSubj,
         body: resolvedBody,
         idempotencyKey,
+        attachments: attachments.map((a) => ({
+          filename: a.filename,
+          content: a.content,
+          mimeType: a.mimeType,
+          size: a.size,
+        })),
       });
 
       if (result.success && result.status === 'sent') {
+        setDeliveryReceipt({
+          channel: 'EMAIL',
+          recipient: `${currentContact.name} (${currentContact.email})`,
+          sentAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          status: 'Delivered',
+          providerMessageId: result.providerMessageId,
+          details: `Dispatched via ${result.provider} · ${attachments.length > 0 ? `${attachments.length} attachment(s)` : 'No attachments'}`,
+        });
+
         success(
           'Email sent successfully!',
           `Delivered to ${currentContact.email} via ${result.provider} (ID: ${result.providerMessageId})`
@@ -537,14 +885,156 @@ export const AiMessageGeneratorModal: React.FC = () => {
             lastContactedAt: new Date().toISOString(),
           });
         }
-        closeAiModal();
       } else {
         toastError(result.error || 'Provider rejected email delivery.');
       }
     } catch (err: any) {
-      toastError(err.message || 'Failed to dispatch email.');
+      const errMsg = err.message || '';
+      if (errMsg.includes('gmail.com') || errMsg.includes('domain is not verified')) {
+        toastError('The gmail.com domain is not verified on Resend. Click "Send with Gmail" below to send directly with your Google account!');
+      } else {
+        toastError(errMsg || 'Failed to dispatch email.');
+      }
     } finally {
       setIsSendingDirectEmail(false);
+    }
+  };
+
+  // Direct send via official Google Workspace / Gmail API
+  const handleSendViaGmail = async () => {
+    if (!currentContact?.email) {
+      toastError('Add an email address to continue.');
+      return;
+    }
+    const defaultSubj = currentFollowUp?.title
+      ? `Following up on ${currentFollowUp.title}`
+      : currentContact?.name
+      ? `Following up with ${currentContact.name}`
+      : 'Quick follow-up';
+    const effectiveSubj = subject.trim() || defaultSubj;
+    const resolvedSubj = resolveMessageVariables(effectiveSubj);
+    const resolvedBody = resolveMessageVariables(messageText.trim());
+
+    if (!resolvedBody) {
+      toastError('Please enter message text before sending.');
+      return;
+    }
+
+    setSubject(resolvedSubj);
+    setMessageText(resolvedBody);
+
+    setIsSendingViaGmail(true);
+    setUnauthorizedDomainNotice(null);
+    try {
+      let activeToken = gmailAccessToken;
+      if (!activeToken) {
+        try {
+          const authResult = await connectGmail();
+          activeToken = authResult.accessToken;
+        } catch (authErr: any) {
+          if (isUnauthorizedDomainError(authErr)) {
+            const domain = typeof window !== 'undefined' ? window.location.hostname : 'this preview domain';
+            setUnauthorizedDomainNotice({ domain, isOpen: true });
+            return;
+          }
+          throw authErr;
+        }
+      }
+
+      const res = await sendEmailViaGmail({
+        to: currentContact.email,
+        subject: resolvedSubj,
+        body: resolvedBody,
+        accessToken: activeToken,
+        fromEmail: gmailUserEmail || undefined,
+        userId: user?.uid,
+        contactId: currentContact.id,
+        followUpId: currentFollowUp?.id,
+      });
+
+      if (res.success) {
+        const isPreview = activeToken.startsWith('preview-');
+        success(
+          isPreview ? 'Simulated Gmail Delivery (Preview Mode)' : 'Email Sent via Gmail!',
+          `Message delivered to ${currentContact.email} ${isPreview ? '(Recorded in Sandbox)' : `from ${res.fromEmail || gmailUserEmail}`}`
+        );
+        if (currentFollowUp && user) {
+          await updateFollowUp(user.uid, currentFollowUp.id, {
+            status: 'contacted',
+            lastContactedAt: new Date().toISOString(),
+          });
+        }
+        closeAiModal();
+      }
+    } catch (err: any) {
+      if (isUnauthorizedDomainError(err)) {
+        const domain = typeof window !== 'undefined' ? window.location.hostname : 'this preview domain';
+        setUnauthorizedDomainNotice({ domain, isOpen: true });
+        return;
+      }
+      console.error('Gmail send error:', err);
+      toastError(err.message || 'Failed to send email via Gmail.');
+    } finally {
+      setIsSendingViaGmail(false);
+    }
+  };
+
+  // Create draft directly in Gmail inbox
+  const handleCreateGmailDraft = async () => {
+    if (!currentContact?.email) {
+      toastError('Add an email address to continue.');
+      return;
+    }
+    const defaultSubj = currentFollowUp?.title
+      ? `Following up on ${currentFollowUp.title}`
+      : currentContact?.name
+      ? `Following up with ${currentContact.name}`
+      : 'Quick follow-up';
+    const effectiveSubj = subject.trim() || defaultSubj;
+    const resolvedSubj = resolveMessageVariables(effectiveSubj);
+    const resolvedBody = resolveMessageVariables(messageText.trim());
+
+    if (!resolvedBody) {
+      toastError('Message body is required.');
+      return;
+    }
+
+    setIsCreatingDraft(true);
+    setUnauthorizedDomainNotice(null);
+    try {
+      let activeToken = gmailAccessToken;
+      if (!activeToken) {
+        try {
+          const authResult = await connectGmail();
+          activeToken = authResult.accessToken;
+        } catch (authErr: any) {
+          if (isUnauthorizedDomainError(authErr)) {
+            const domain = typeof window !== 'undefined' ? window.location.hostname : 'this preview domain';
+            setUnauthorizedDomainNotice({ domain, isOpen: true });
+            return;
+          }
+          throw authErr;
+        }
+      }
+
+      await createGmailDraft({
+        to: currentContact.email,
+        subject: resolvedSubj,
+        body: resolvedBody,
+        accessToken: activeToken,
+        fromEmail: gmailUserEmail || undefined,
+      });
+
+      success('Saved as Gmail Draft!', `Draft created in your Gmail inbox for ${currentContact.email}.`);
+    } catch (err: any) {
+      if (isUnauthorizedDomainError(err)) {
+        const domain = typeof window !== 'undefined' ? window.location.hostname : 'this preview domain';
+        setUnauthorizedDomainNotice({ domain, isOpen: true });
+        return;
+      }
+      toastError(err.message || 'Failed to create Gmail draft.');
+    } finally {
+      setIsCreatingDraft(false);
     }
   };
 
@@ -554,13 +1044,15 @@ export const AiMessageGeneratorModal: React.FC = () => {
       toastError('Add an email address to continue.');
       return;
     }
-    const resolvedSubj = resolveMessageVariables(subject.trim());
+    const defaultSubj = currentFollowUp?.title
+      ? `Following up on ${currentFollowUp.title}`
+      : currentContact?.name
+      ? `Following up with ${currentContact.name}`
+      : 'Quick follow-up';
+    const effectiveSubj = subject.trim() || defaultSubj;
+    const resolvedSubj = resolveMessageVariables(effectiveSubj);
     const resolvedBody = resolveMessageVariables(messageText.trim());
 
-    if (!resolvedSubj) {
-      toastError('Please enter an email subject line.');
-      return;
-    }
     if (!resolvedBody) {
       toastError('Please enter message text before scheduling.');
       return;
@@ -601,15 +1093,29 @@ export const AiMessageGeneratorModal: React.FC = () => {
         body: resolvedBody,
         scheduledFor: scheduledDate.toISOString(),
         idempotencyKey,
+        attachments: attachments.map((a) => ({
+          filename: a.filename,
+          content: a.content,
+          mimeType: a.mimeType,
+          size: a.size,
+        })),
       });
 
       if (result.success) {
+        setDeliveryReceipt({
+          channel: 'EMAIL (SCHEDULED)',
+          recipient: `${currentContact.name} (${currentContact.email})`,
+          sentAt: `${scheduledDate.toLocaleDateString()} at ${scheduledDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+          status: 'Scheduled in Queue',
+          providerMessageId: result.job?.id,
+          details: `Automated server cron will deliver this message · ${attachments.length > 0 ? `${attachments.length} attachment(s)` : 'No attachments'}`,
+        });
+
         success(
           'Email scheduled!',
           `Server will automatically dispatch to ${currentContact.email} on ${scheduledDate.toLocaleDateString()} at ${scheduledDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`
         );
         setShowSchedulePicker(false);
-        closeAiModal();
       } else {
         toastError(result.error || 'Failed to schedule email.');
       }
@@ -691,7 +1197,7 @@ export const AiMessageGeneratorModal: React.FC = () => {
                 }`}
               >
                 <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-                AI Assisted
+                Generate with AI
               </button>
               <button
                 type="button"
@@ -759,13 +1265,14 @@ export const AiMessageGeneratorModal: React.FC = () => {
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
-                Channel Formatting
+                Channel Dispatch
               </label>
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                 {[
                   { id: 'email', label: 'Email', icon: Mail },
                   { id: 'whatsapp', label: 'WhatsApp', icon: MessageSquare },
                   { id: 'phone', label: 'Phone Call', icon: Phone },
+                  { id: 'manual', label: 'Manual/Copy', icon: Copy },
                 ].map((ch) => {
                   const Icon = ch.icon;
                   const isSelected = channel === ch.id;
@@ -773,7 +1280,18 @@ export const AiMessageGeneratorModal: React.FC = () => {
                     <button
                       key={ch.id}
                       type="button"
-                      onClick={() => setChannel(ch.id as FollowUpChannel)}
+                      onClick={() => {
+                        const nextChan = ch.id as FollowUpChannel;
+                        setChannel(nextChan);
+                        if (nextChan === 'email' && !subject.trim()) {
+                          const defaultSubj = currentFollowUp?.title
+                            ? `Following up on ${currentFollowUp.title}`
+                            : currentContact?.name
+                            ? `Following up with ${currentContact.name}`
+                            : 'Quick follow-up';
+                          setSubject(defaultSubj);
+                        }
+                      }}
                       className={`py-2 px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
                         isSelected
                           ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
@@ -997,22 +1515,25 @@ export const AiMessageGeneratorModal: React.FC = () => {
               {/* Subject Line (Email Only) */}
               {channel === 'email' && (
                 <div>
-                  <span className="block text-[11px] font-bold text-slate-600 uppercase tracking-wider mb-1">
-                    Subject Line *
-                  </span>
-                  {editMode || composerMode === 'manual' ? (
-                    <input
-                      type="text"
-                      value={subject}
-                      onChange={(e) => setSubject(e.target.value)}
-                      placeholder="e.g. Following up on {{project_name}} for {{company_name}}"
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm bg-white font-medium focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
-                    />
-                  ) : (
-                    <p className="text-sm font-semibold text-slate-900 bg-white p-2.5 rounded-xl border border-slate-200">
-                      {subject || 'No subject line'}
-                    </p>
-                  )}
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label
+                      htmlFor="ai-email-subject-input"
+                      className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider"
+                    >
+                      Email Subject Line <span className="text-rose-500">*</span>
+                    </label>
+                    <span className="text-[10px] text-slate-400 font-medium">
+                      Editable anytime
+                    </span>
+                  </div>
+                  <input
+                    id="ai-email-subject-input"
+                    type="text"
+                    value={subject}
+                    onChange={(e) => setSubject(e.target.value)}
+                    placeholder={`e.g. Following up with ${currentContact?.name || 'client'}`}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm bg-white font-medium text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-hidden transition-all shadow-xs"
+                  />
                 </div>
               )}
 
@@ -1034,15 +1555,294 @@ export const AiMessageGeneratorModal: React.FC = () => {
                     {messageText}
                   </div>
                 )}
+                {/* Improve with AI quick-action button */}
+                <div className="flex items-center justify-between pt-2">
+                  <span className="text-[11px] text-slate-500">
+                    {composerMode === 'manual' ? 'Drafting manually. AI assistance optional.' : 'AI message ready to edit or polish.'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleImproveWithAi}
+                    disabled={improvingWithAi || !messageText.trim()}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 transition-colors flex items-center gap-1.5 disabled:opacity-50 shadow-2xs"
+                  >
+                    {improvingWithAi ? (
+                      <>
+                        <span className="inline-block w-3.5 h-3.5 border-2 border-purple-700 border-t-transparent rounded-full animate-spin" />
+                        Polishing tone & clarity...
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 className="w-3.5 h-3.5 text-purple-600" />
+                        Improve with AI
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
+
+              {/* Email Attachments Manager */}
+              {channel === 'email' && (
+                <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-stone-700 uppercase tracking-wider flex items-center gap-1.5">
+                      <Paperclip className="w-3.5 h-3.5 text-blue-600" />
+                      Email Attachments ({attachments.length})
+                    </span>
+                    <label className="text-xs font-semibold text-blue-600 hover:text-blue-800 cursor-pointer flex items-center gap-1 px-2 py-0.5 rounded-md hover:bg-blue-50 transition-colors">
+                      <span>+ Attach File</span>
+                      <input
+                        type="file"
+                        multiple
+                        onChange={handleAttachmentUpload}
+                        className="hidden"
+                        accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.csv,.xlsx,.txt"
+                      />
+                    </label>
+                  </div>
+                  {attachments.length === 0 ? (
+                    <p className="text-[11px] text-stone-400 italic">
+                      No files attached. Optional: attach PDF quotes, invoices, or proposal decks (up to 10MB each).
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {attachments.map((att, idx) => (
+                        <div
+                          key={idx}
+                          className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white border border-stone-200 text-xs text-stone-800 shadow-2xs"
+                        >
+                          <div className="flex items-center gap-2 truncate pr-2">
+                            <FileCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span className="truncate font-medium">{att.filename}</span>
+                            <span className="text-[10px] text-stone-400 shrink-0">
+                              ({(att.size / 1024).toFixed(0)} KB)
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveAttachment(idx)}
+                            className="text-stone-400 hover:text-rose-600 p-0.5 transition-colors"
+                            title="Remove attachment"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Real Delivery Receipt (Visible after any successful dispatch) */}
+              {deliveryReceipt && (
+                <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-950 space-y-2.5 animate-in fade-in">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-7 h-7 rounded-lg bg-emerald-200 text-emerald-800 flex items-center justify-center shrink-0">
+                        <CheckCheck className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono uppercase font-bold px-1.5 py-0.5 rounded-sm bg-emerald-200/80 text-emerald-900">
+                            {deliveryReceipt.channel}
+                          </span>
+                          <span className="text-xs font-bold text-emerald-900">
+                            {deliveryReceipt.status}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-emerald-800 mt-0.5">
+                          Recipient: <strong>{deliveryReceipt.recipient}</strong> · {deliveryReceipt.sentAt}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setDeliveryReceipt(null)}
+                      className="text-emerald-700 hover:text-emerald-900 text-xs font-semibold"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+
+                  {deliveryReceipt.details && (
+                    <p className="text-[11px] text-emerald-800 font-mono bg-emerald-100/60 p-2 rounded-lg leading-relaxed">
+                      {deliveryReceipt.details}
+                      {deliveryReceipt.providerMessageId && (
+                        <span className="block text-[10px] text-emerald-700 mt-0.5">
+                          Provider Msg ID: {deliveryReceipt.providerMessageId}
+                        </span>
+                      )}
+                    </p>
+                  )}
+
+                  {currentFollowUp && (
+                    <div className="pt-1 flex items-center justify-end gap-2 border-t border-emerald-200/80">
+                      <button
+                        type="button"
+                        onClick={handleMarkAsCompleted}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-2xs"
+                      >
+                        <Check className="w-3 h-3" />
+                        Mark Follow-Up Completed & Close
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Action Buttons: Multi-Channel Dispatch */}
               <div className="pt-2 space-y-2.5">
                 {/* Email Channel Action Suite */}
                 {channel === 'email' && (
-                  <div className="space-y-2">
+                  <div className="space-y-3">
+                    {/* Gmail Direct Dispatch Banner / Controls */}
+                    <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-lg bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                          <Mail className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs font-bold text-stone-900">
+                              {isGmailConnected
+                                ? `Gmail Connected (${gmailUserEmail})`
+                                : 'Send with Your Personal Gmail Account'}
+                            </p>
+                            {isGmailConnected && isGmailPreviewMode && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-200 text-amber-900 border border-amber-300 flex items-center gap-1">
+                                <TestTube2 className="w-2.5 h-2.5" /> Sandbox
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-stone-600">
+                            {isGmailConnected
+                              ? isGmailPreviewMode
+                                ? 'Sandbox testing enabled. API calls simulate Gmail delivery.'
+                                : 'Delivers directly from your authenticated Google inbox.'
+                              : 'Bypasses third-party domain restrictions. 1-click Google sign-in.'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {isGmailConnected ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={handleSendViaGmail}
+                              disabled={isSendingViaGmail || !currentContact?.email || !messageText.trim()}
+                              className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-xs flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                            >
+                              {isSendingViaGmail ? (
+                                <>
+                                  <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                  Sending...
+                                </>
+                              ) : (
+                                <>
+                                  <Send className="w-3 h-3" />
+                                  Send with Gmail
+                                </>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCreateGmailDraft}
+                              disabled={isCreatingDraft || !currentContact?.email || !messageText.trim()}
+                              className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-700 font-medium text-xs transition-colors disabled:opacity-50"
+                              title="Save as draft in your Gmail inbox"
+                            >
+                              {isCreatingDraft ? 'Saving...' : 'Save Draft'}
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleSendViaGmail}
+                            disabled={isSendingViaGmail || !currentContact?.email || !messageText.trim()}
+                            className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-xs flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                          >
+                            {isSendingViaGmail ? (
+                              <>
+                                <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                Connecting Google...
+                              </>
+                            ) : (
+                              <>
+                                <Mail className="w-3.5 h-3.5" />
+                                Connect & Send via Gmail
+                              </>
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Unauthorized Domain Diagnostic Warning */}
+                    {unauthorizedDomainNotice?.isOpen && (
+                      <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 space-y-2.5 animate-in fade-in">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                          <div className="space-y-1 text-xs">
+                            <p className="font-bold text-amber-900">
+                              Google Sign-In requires domain authorization in Firebase
+                            </p>
+                            <p className="text-[11px] text-amber-800 leading-relaxed">
+                              Firebase blocked Google popup login because this container domain is not whitelisted:
+                            </p>
+                            <div className="flex items-center gap-2 flex-wrap pt-0.5">
+                              <code className="px-2 py-0.5 rounded bg-amber-100 border border-amber-300 font-mono text-[11px] text-amber-900 select-all">
+                                {unauthorizedDomainNotice.domain}
+                              </code>
+                              <button
+                                type="button"
+                                onClick={handleCopyModalDomain}
+                                className="px-2 py-0.5 rounded bg-white border border-amber-300 text-xs font-semibold text-amber-900 flex items-center gap-1 hover:bg-amber-100 transition-colors"
+                              >
+                                {copiedDomain ? (
+                                  <>
+                                    <Check className="w-3 h-3 text-emerald-600" /> Copied!
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3 h-3" /> Copy
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-amber-200">
+                          <button
+                            type="button"
+                            onClick={handleSendWithPreviewSandbox}
+                            className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-2xs transition-colors"
+                          >
+                            <TestTube2 className="w-3.5 h-3.5" />
+                            Send with Sandbox Mode
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleOpenGmailWeb}
+                            className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 hover:bg-stone-50 text-stone-800 font-bold text-xs flex items-center gap-1.5 transition-colors"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5 text-red-600" />
+                            Open Pre-filled in Gmail Web
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setUnauthorizedDomainNotice(null)}
+                            className="ml-auto text-xs text-amber-800 hover:text-amber-950 font-medium px-2 py-1"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="flex flex-wrap items-center gap-2">
-                      {/* Direct Real Email Send */}
+                      {/* Direct Real Email Send via Resend/Server */}
                       <button
                         type="button"
                         onClick={handleSendDirectEmail}
@@ -1050,8 +1850,8 @@ export const AiMessageGeneratorModal: React.FC = () => {
                         className="flex-1 py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold text-xs shadow-xs flex items-center justify-center gap-2 transition-all disabled:opacity-50"
                         title={
                           emailConfig.isConfigured
-                            ? 'Deliver real email via Resend'
-                            : 'Resend API key not set - will report provider status'
+                            ? 'Deliver email via server mail service'
+                            : 'Server email service'
                         }
                       >
                         {isSendingDirectEmail ? (
@@ -1062,9 +1862,21 @@ export const AiMessageGeneratorModal: React.FC = () => {
                         ) : (
                           <>
                             <Send className="w-3.5 h-3.5" />
-                            Send Email Now
+                            Send via Mail Server
                           </>
                         )}
+                      </button>
+
+                      {/* Open Pre-filled in Web Gmail */}
+                      <button
+                        type="button"
+                        onClick={handleOpenGmailWeb}
+                        disabled={!currentContact?.email}
+                        className="py-2.5 px-3.5 rounded-xl border border-red-200 bg-red-50/60 hover:bg-red-100 text-red-700 font-bold text-xs shadow-xs flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+                        title="Open composed message in mail.google.com"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5 text-red-600" />
+                        Gmail Web
                       </button>
 
                       {/* Schedule Button */}
@@ -1087,7 +1899,7 @@ export const AiMessageGeneratorModal: React.FC = () => {
                         className="py-2.5 px-3.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold text-xs shadow-xs flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
                       >
                         <Mail className="w-3.5 h-3.5" />
-                        Open in Mail App
+                        Mail App
                       </button>
                     </div>
 
@@ -1159,50 +1971,93 @@ export const AiMessageGeneratorModal: React.FC = () => {
 
                 {/* WhatsApp Channel Action Suite */}
                 {channel === 'whatsapp' && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleOpenWhatsApp}
-                      disabled={!hasWhatsAppNumber}
-                      className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-semibold text-xs shadow-xs flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
-                    >
-                      <MessageSquare className="w-4 h-4" />
-                      Open WhatsApp with Message
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCopy}
-                      className="py-2.5 px-3.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold text-xs shadow-xs flex items-center gap-1.5"
-                    >
-                      <Copy className="w-3.5 h-3.5 text-slate-500" />
-                      Copy Text
-                    </button>
+                  <div className="space-y-2.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleOpenWhatsApp}
+                        disabled={!hasWhatsAppNumber}
+                        className="flex-1 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs shadow-xs flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                      >
+                        <MessageSquare className="w-4 h-4" />
+                        Open WhatsApp & Dispatch
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCopy}
+                        className="py-2.5 px-3.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold text-xs shadow-xs flex items-center gap-1.5"
+                      >
+                        <Copy className="w-3.5 h-3.5 text-slate-500" />
+                        Copy Text
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-stone-500 italic">
+                      Launches WhatsApp with the formatted message loaded and records an audit event in {currentContact?.name}'s timeline.
+                    </p>
                   </div>
                 )}
 
                 {/* Phone Call Channel Action Suite */}
                 {channel === 'phone' && (
-                  <div className="space-y-2">
-                    <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-amber-900 text-xs flex items-center justify-between">
+                  <div className="space-y-3 p-3.5 bg-amber-50/80 rounded-xl border border-amber-200 text-xs">
+                    <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Phone className="w-4 h-4 text-amber-600" />
                         <span>
-                          Phone Number:{' '}
-                          <strong className="text-amber-950">
+                          Direct Phone:{' '}
+                          <strong className="text-amber-950 text-sm">
                             {currentContact?.phone || currentContact?.whatsapp || 'No number saved'}
                           </strong>
                         </span>
                       </div>
                       {(currentContact?.phone || currentContact?.whatsapp) && (
-                        <a
-                          href={`tel:${(currentContact.phone || currentContact.whatsapp || '').replace(/[^\d+]/g, '')}`}
-                          className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-xs inline-flex items-center gap-1"
-                        >
-                          <Phone className="w-3 h-3" />
-                          Call Now
-                        </a>
+                        <span className="text-[10px] font-bold uppercase bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded-md">
+                          Dialer Ready
+                        </span>
                       )}
                     </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-amber-900 uppercase tracking-wider mb-1">
+                        Call Notes (Optional - Recorded in Client Timeline)
+                      </label>
+                      <input
+                        type="text"
+                        value={callNotes}
+                        onChange={(e) => setCallNotes(e.target.value)}
+                        placeholder="e.g. Left voicemail / Client requested proposal revision by Friday..."
+                        className="w-full px-3 py-2 rounded-lg border border-amber-300 bg-white text-xs text-stone-900 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+
+                    <div className="pt-1">
+                      <button
+                        type="button"
+                        onClick={handleCallInitiation}
+                        disabled={!currentContact?.phone && !currentContact?.whatsapp}
+                        className="w-full py-2.5 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white font-bold text-xs shadow-xs flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                      >
+                        <Phone className="w-3.5 h-3.5" />
+                        Call Now & Record in Timeline
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Manual / Copy Channel Action Suite */}
+                {channel === 'manual' && (
+                  <div className="space-y-2.5 p-3.5 bg-stone-50 rounded-xl border border-stone-200 text-xs">
+                    <p className="text-[11px] text-stone-600">
+                      Copy the generated message to paste directly into your messaging tool of choice (LinkedIn InMail, Slack, SMS, or CRM).
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleCopy}
+                      className="w-full py-2.5 px-4 rounded-xl bg-stone-900 hover:bg-black text-white font-bold text-xs shadow-xs flex items-center justify-center gap-2 transition-all"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      Copy Formatted Message & Log Timeline Action
+                    </button>
                   </div>
                 )}
 

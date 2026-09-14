@@ -19,7 +19,13 @@ export const ContactModal: React.FC<ContactModalProps> = ({ isOpen, onClose, con
   const [email, setEmail] = useState<string>('');
   const [phone, setPhone] = useState<string>('');
   const [whatsapp, setWhatsapp] = useState<string>('');
-  const [preferredChannel, setPreferredChannel] = useState<'whatsapp' | 'email' | 'sms' | 'phone' | 'other'>('whatsapp');
+  const [preferredChannel, setPreferredChannel] = useState<'whatsapp' | 'email' | 'sms' | 'phone' | 'manual' | 'other'>('email');
+  const [project, setProject] = useState<string>('');
+  const [service, setService] = useState<string>('');
+  const [amount, setAmount] = useState<string>('');
+  const [currency, setCurrency] = useState<string>('USD');
+  const [timezone, setTimezone] = useState<string>(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  const [communicationConsent, setCommunicationConsent] = useState<boolean>(true);
   const [tagsInput, setTagsInput] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
@@ -32,7 +38,13 @@ export const ContactModal: React.FC<ContactModalProps> = ({ isOpen, onClose, con
         setEmail(contactToEdit.email || '');
         setPhone(contactToEdit.phone || '');
         setWhatsapp(contactToEdit.whatsapp || '');
-        setPreferredChannel(contactToEdit.preferredChannel || 'whatsapp');
+        setProject(contactToEdit.project || '');
+        setService(contactToEdit.service || '');
+        setAmount(contactToEdit.amount !== undefined ? String(contactToEdit.amount) : '');
+        setCurrency(contactToEdit.currency || 'USD');
+        setPreferredChannel((contactToEdit.preferredChannel as any) || 'email');
+        setTimezone(contactToEdit.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+        setCommunicationConsent(contactToEdit.communicationConsent !== false);
         setTagsInput((contactToEdit.tags || []).join(', '));
         setNotes(contactToEdit.notes || '');
       } else {
@@ -41,7 +53,13 @@ export const ContactModal: React.FC<ContactModalProps> = ({ isOpen, onClose, con
         setEmail('');
         setPhone('');
         setWhatsapp('');
-        setPreferredChannel('whatsapp');
+        setProject('');
+        setService('');
+        setAmount('');
+        setCurrency('USD');
+        setPreferredChannel('email');
+        setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+        setCommunicationConsent(true);
         setTagsInput('');
         setNotes('');
       }
@@ -62,6 +80,8 @@ export const ContactModal: React.FC<ContactModalProps> = ({ isOpen, onClose, con
       .map((t) => t.trim())
       .filter((t) => t.length > 0);
 
+    const parsedAmount = amount.trim() ? parseFloat(amount) : undefined;
+
     setLoading(true);
     try {
       if (contactToEdit) {
@@ -71,7 +91,13 @@ export const ContactModal: React.FC<ContactModalProps> = ({ isOpen, onClose, con
           email: email.trim() || undefined,
           phone: phone.trim() || undefined,
           whatsapp: whatsapp.trim() || phone.trim() || undefined,
+          project: project.trim() || undefined,
+          service: service.trim() || undefined,
+          amount: isNaN(parsedAmount as number) ? undefined : parsedAmount,
+          currency: currency.trim() || 'USD',
           preferredChannel,
+          timezone,
+          communicationConsent,
           tags,
           notes: notes.trim() || undefined,
         });
@@ -83,7 +109,13 @@ export const ContactModal: React.FC<ContactModalProps> = ({ isOpen, onClose, con
           email: email.trim() || undefined,
           phone: phone.trim() || undefined,
           whatsapp: whatsapp.trim() || phone.trim() || undefined,
+          project: project.trim() || undefined,
+          service: service.trim() || undefined,
+          amount: isNaN(parsedAmount as number) ? undefined : parsedAmount,
+          currency: currency.trim() || 'USD',
           preferredChannel,
+          timezone,
+          communicationConsent,
           tags,
           notes: notes.trim() || undefined,
         });
@@ -156,6 +188,74 @@ export const ContactModal: React.FC<ContactModalProps> = ({ isOpen, onClose, con
             </div>
           </div>
 
+          {/* Project & Service Context */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">
+                Project / Account
+              </label>
+              <input
+                type="text"
+                value={project}
+                onChange={(e) => setProject(e.target.value)}
+                placeholder="e.g. Website Redesign, Mobile App"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50/50 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">
+                Service / Offering
+              </label>
+              <input
+                type="text"
+                value={service}
+                onChange={(e) => setService(e.target.value)}
+                placeholder="e.g. Monthly Retainer, Consulting"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50/50 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              />
+            </div>
+          </div>
+
+          {/* Deal Value & Currency */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">
+                Estimated Value
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="e.g. 2500"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50/50 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">
+                Currency
+              </label>
+              <select
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50/50 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              >
+                <option value="USD">USD ($)</option>
+                <option value="EUR">EUR (€)</option>
+                <option value="GBP">GBP (£)</option>
+                <option value="CAD">CAD ($)</option>
+                <option value="AUD">AUD ($)</option>
+                <option value="NGN">NGN (₦)</option>
+                <option value="ZAR">ZAR (R)</option>
+                <option value="KES">KES (KSh)</option>
+                <option value="GHS">GHS (GH₵)</option>
+              </select>
+            </div>
+          </div>
+
           {/* Email & WhatsApp / Phone */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -191,47 +291,136 @@ export const ContactModal: React.FC<ContactModalProps> = ({ isOpen, onClose, con
             </div>
           </div>
 
+          {/* Live Channel Availability Indicators */}
+          <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+            <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+              Communication Channel Availability
+            </p>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div
+                className={`px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                  email.trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : 'bg-slate-100 text-slate-400 border-slate-200'
+                }`}
+              >
+                <Mail className="w-3.5 h-3.5 shrink-0" />
+                <span className="font-semibold truncate">
+                  {email.trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+                    ? 'Email ✓'
+                    : 'Email unavailable'}
+                </span>
+              </div>
+
+              <div
+                className={`px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                  whatsapp.trim() || phone.trim()
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : 'bg-slate-100 text-slate-400 border-slate-200'
+                }`}
+              >
+                <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                <span className="font-semibold truncate">
+                  {whatsapp.trim() || phone.trim() ? 'WhatsApp ✓' : 'WhatsApp unavailable'}
+                </span>
+              </div>
+
+              <div
+                className={`px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                  phone.trim()
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : 'bg-slate-100 text-slate-400 border-slate-200'
+                }`}
+              >
+                <Phone className="w-3.5 h-3.5 shrink-0" />
+                <span className="font-semibold truncate">
+                  {phone.trim() ? 'Phone ✓' : 'Phone unavailable'}
+                </span>
+              </div>
+            </div>
+          </div>
+
           {/* Channel Preference */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">
               Preferred Follow-Up Channel
             </label>
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={() => setPreferredChannel('whatsapp')}
-                className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition-all ${
-                  preferredChannel === 'whatsapp'
-                    ? 'bg-emerald-50 border-emerald-500 text-emerald-800 ring-1 ring-emerald-500'
-                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                }`}
-              >
-                <MessageSquare className="w-3.5 h-3.5 text-emerald-600" /> WhatsApp
-              </button>
-
+            <div className="grid grid-cols-4 gap-2">
               <button
                 type="button"
                 onClick={() => setPreferredChannel('email')}
-                className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition-all ${
+                className={`py-2 px-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition-all ${
                   preferredChannel === 'email'
                     ? 'bg-blue-50 border-blue-500 text-blue-800 ring-1 ring-blue-500'
                     : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
                 }`}
               >
-                <Mail className="w-3.5 h-3.5 text-blue-600" /> Email
+                <Mail className="w-3.5 h-3.5 text-blue-600 shrink-0" /> Email
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setPreferredChannel('whatsapp')}
+                className={`py-2 px-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition-all ${
+                  preferredChannel === 'whatsapp'
+                    ? 'bg-emerald-50 border-emerald-500 text-emerald-800 ring-1 ring-emerald-500'
+                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                <MessageSquare className="w-3.5 h-3.5 text-emerald-600 shrink-0" /> WhatsApp
               </button>
 
               <button
                 type="button"
                 onClick={() => setPreferredChannel('phone')}
-                className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition-all ${
+                className={`py-2 px-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition-all ${
                   preferredChannel === 'phone'
                     ? 'bg-slate-100 border-slate-700 text-slate-900 ring-1 ring-slate-700'
                     : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
                 }`}
               >
-                <Phone className="w-3.5 h-3.5 text-slate-600" /> Phone
+                <Phone className="w-3.5 h-3.5 text-slate-600 shrink-0" /> Phone
               </button>
+
+              <button
+                type="button"
+                onClick={() => setPreferredChannel('manual')}
+                className={`py-2 px-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition-all ${
+                  preferredChannel === 'manual'
+                    ? 'bg-amber-50 border-amber-600 text-amber-900 ring-1 ring-amber-600'
+                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                <FileText className="w-3.5 h-3.5 text-amber-600 shrink-0" /> Manual
+              </button>
+            </div>
+          </div>
+
+          {/* Timezone & Consent */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">
+                Contact Timezone
+              </label>
+              <input
+                type="text"
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+                placeholder="e.g. America/New_York, Europe/London"
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50/50 text-xs focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="pt-4">
+              <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={communicationConsent}
+                  onChange={(e) => setCommunicationConsent(e.target.checked)}
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4"
+                />
+                <span>Recipient has consented to outreach</span>
+              </label>
             </div>
           </div>
 

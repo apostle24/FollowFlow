@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useFollowUp } from '../../context/FollowUpContext';
 import { useToast } from '../common/Toast';
+import { isUnauthorizedDomainError } from '../../services/gmail';
 import {
   User,
   Building,
@@ -15,13 +16,30 @@ import {
   Sliders,
   DollarSign,
   CheckCircle2,
+  Mail,
+  ExternalLink,
+  AlertTriangle,
+  Copy,
+  Check,
+  TestTube2,
 } from 'lucide-react';
 import { PLAN_LIMITS } from '../../types';
 
 import { BillingSettings } from '../billing/BillingSettings';
 
 export const SettingsView: React.FC = () => {
-  const { userProfile, updateProfile, signOut } = useAuth();
+  const {
+    userProfile,
+    user,
+    updateProfile,
+    signOut,
+    isGmailConnected,
+    isGmailPreviewMode,
+    gmailUserEmail,
+    connectGmail,
+    enablePreviewGmail,
+    disconnectGmail,
+  } = useAuth();
   const { clearData } = useFollowUp();
   const { success, error: toastError } = useToast();
 
@@ -31,6 +49,50 @@ export const SettingsView: React.FC = () => {
   const [defaultCurrency, setDefaultCurrency] = useState(userProfile?.defaultCurrency || '$');
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [connectingGmail, setConnectingGmail] = useState(false);
+  const [unauthorizedDomainError, setUnauthorizedDomainError] = useState<{ domain: string } | null>(null);
+  const [copiedDomain, setCopiedDomain] = useState(false);
+
+  const handleConnectGmail = async () => {
+    setConnectingGmail(true);
+    setUnauthorizedDomainError(null);
+    try {
+      const res = await connectGmail();
+      success('Gmail Connected', `Successfully connected as ${res.email}. You can now send emails directly from your Gmail.`);
+    } catch (err: any) {
+      if (isUnauthorizedDomainError(err)) {
+        const domain = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+        setUnauthorizedDomainError({ domain });
+        toastError('Firebase domain authorization required for Google sign-in.');
+      } else {
+        toastError(err.message || 'Failed to connect Gmail');
+      }
+    } finally {
+      setConnectingGmail(false);
+    }
+  };
+
+  const handleEnablePreview = () => {
+    const email = userProfile?.email || user?.email || 'founder@business.com';
+    enablePreviewGmail(email);
+    setUnauthorizedDomainError(null);
+    success('Preview Gmail Connected', `Sandbox mode active as ${email}. You can test Gmail templates and dispatching.`);
+  };
+
+  const handleCopyDomain = () => {
+    const domain = unauthorizedDomainError?.domain || (typeof window !== 'undefined' ? window.location.hostname : '');
+    if (domain) {
+      navigator.clipboard.writeText(domain);
+      setCopiedDomain(true);
+      setTimeout(() => setCopiedDomain(false), 2500);
+    }
+  };
+
+  const handleDisconnectGmail = () => {
+    disconnectGmail();
+    setUnauthorizedDomainError(null);
+    success('Gmail Disconnected', 'Your Google session has been disconnected from email dispatching.');
+  };
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -82,6 +144,147 @@ export const SettingsView: React.FC = () => {
 
       {/* Plan & Subscription Card (Paystack) */}
       <BillingSettings />
+
+      {/* Google Workspace / Gmail Integration Card */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5">
+            <div className="w-10 h-10 rounded-xl bg-red-50 text-red-600 flex items-center justify-center shrink-0 border border-red-100">
+              <Mail className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-base font-bold text-slate-900">Google Workspace & Gmail Dispatch</h3>
+                {isGmailConnected ? (
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 ${
+                    isGmailPreviewMode
+                      ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                      : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                  }`}>
+                    {isGmailPreviewMode ? (
+                      <>
+                        <TestTube2 className="w-3 h-3" /> Preview Mode (Sandbox)
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-3 h-3" /> Connected
+                      </>
+                    )}
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-600">
+                    Not Connected
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-500 mt-1 max-w-xl leading-relaxed">
+                Connect your Google account to dispatch follow-up emails directly from your verified personal or Google Workspace email address. Bypasses third-party transactional domain restrictions.
+              </p>
+              {isGmailConnected && gmailUserEmail && (
+                <p className="text-xs font-semibold text-slate-700 mt-2 flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full inline-block ${isGmailPreviewMode ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                  Sending as: <span className="font-mono text-blue-600">{gmailUserEmail}</span>
+                  {isGmailPreviewMode && (
+                    <span className="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                      Sandbox logging enabled
+                    </span>
+                  )}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="shrink-0 pt-2 sm:pt-0">
+            {isGmailConnected ? (
+              <button
+                type="button"
+                onClick={handleDisconnectGmail}
+                className="px-4 py-2 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold transition-colors"
+              >
+                Disconnect Gmail
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleConnectGmail}
+                disabled={connectingGmail}
+                className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-sm shadow-blue-200 flex items-center gap-2 transition-all disabled:opacity-60"
+              >
+                {connectingGmail ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Connecting Google...
+                  </>
+                ) : (
+                  <>
+                    <Mail className="w-3.5 h-3.5" />
+                    Connect with Gmail
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Unauthorized Domain Diagnostic & Resolution Banner */}
+        {unauthorizedDomainError && (
+          <div className="mt-4 p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 space-y-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="text-xs font-bold text-amber-900">
+                  Firebase Domain Authorization Required for Live Google Sign-In
+                </p>
+                <p className="text-[11px] text-amber-800 leading-relaxed">
+                  Firebase Authentication requires preview domains to be explicitly whitelisted. The current container domain is not yet on your Firebase project's authorized list:
+                </p>
+                <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                  <code className="px-2 py-1 rounded bg-amber-100 border border-amber-300 font-mono text-[11px] text-amber-900 select-all">
+                    {unauthorizedDomainError.domain}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={handleCopyDomain}
+                    className="px-2.5 py-1 rounded-lg bg-white border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-semibold flex items-center gap-1 transition-colors"
+                  >
+                    {copiedDomain ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-600" /> Copied!
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" /> Copy Domain
+                      </>
+                    )}
+                  </button>
+                </div>
+                <div className="pt-2 text-[11px] text-amber-800 space-y-1">
+                  <p className="font-semibold text-amber-900">How to authorize permanently in Firebase:</p>
+                  <ol className="list-decimal list-inside space-y-0.5 pl-1">
+                    <li>Go to <span className="font-medium text-amber-950">Firebase Console &gt; Authentication &gt; Settings</span></li>
+                    <li>Click <span className="font-medium text-amber-950">Authorized domains</span> tab &gt; <span className="font-medium text-amber-950">Add domain</span></li>
+                    <li>Paste <code className="font-mono text-[10px]">{unauthorizedDomainError.domain}</code> and save</li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-1 border-t border-amber-200/80 flex items-center justify-between gap-3">
+              <span className="text-[11px] text-amber-800">
+                Want to test Gmail features immediately without configuring Firebase domains?
+              </span>
+              <button
+                type="button"
+                onClick={handleEnablePreview}
+                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shrink-0 flex items-center gap-1.5 transition-colors shadow-xs"
+              >
+                <TestTube2 className="w-3.5 h-3.5" />
+                Connect Preview Sandbox
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
 
 
       {/* Profile & Business Details Form */}

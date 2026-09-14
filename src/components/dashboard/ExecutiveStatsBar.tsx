@@ -139,7 +139,7 @@ export const ExecutiveStatsBar: React.FC<ExecutiveStatsBarProps> = ({
                 <h2 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
                   Executive Operations Overview
                   <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-800">
-                    Live Firestore
+                    Live Pipeline
                   </span>
                 </h2>
                 <p className="text-xs text-slate-500">
@@ -243,7 +243,7 @@ export const ExecutiveStatsBar: React.FC<ExecutiveStatsBarProps> = ({
                   </span>
                 </div>
                 <span className="text-[10px] text-emerald-700 block mt-0.5">
-                  Saved directly to Firestore
+                  Active pipeline leads
                 </span>
               </div>
               <button

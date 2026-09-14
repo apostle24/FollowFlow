@@ -118,6 +118,8 @@ export const SequencesView: React.FC<SequencesViewProps> = () => {
           success('Sequence deleted.');
         } catch (err: any) {
           toastError('Failed to delete sequence.');
+        } finally {
+          setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
         }
       },
     });
@@ -159,6 +161,8 @@ export const SequencesView: React.FC<SequencesViewProps> = () => {
           success('Contact removed from sequence.');
         } catch {
           toastError('Failed to remove enrollment.');
+        } finally {
+          setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
         }
       },
     });

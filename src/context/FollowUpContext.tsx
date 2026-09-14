@@ -34,22 +34,40 @@ import {
   updateSequenceEnrollmentStatus,
   deleteSequenceEnrollment,
   logTimelineEvent,
+  logGeneratedMessage,
 } from '../services/db';
+import { generateFollowUpMessage } from '../services/ai';
 import { trackEvent } from '../services/analytics';
+import { emitBusinessEvent } from '../services/eventBus';
 import {
   PLAN_LIMITS,
   type Contact,
   type FollowUp,
+  type FollowUpStatus,
   type Sequence,
   type SequenceEnrollment,
   type SequenceEnrollmentStepHistory,
   type SequenceEnrollmentStatus,
   type FollowUpChannel,
+  type MessageTone,
   type Lead,
   type Appointment,
   type LeadSource,
   type LeadStatus,
 } from '../types';
+
+export interface AiDraftState {
+  contactId: string;
+  followUpId: string;
+  subject: string;
+  messageText: string;
+  channel: FollowUpChannel;
+  tone: MessageTone;
+  contextInput: string;
+  isGenerating: boolean;
+  error: string | null;
+  lastGeneratedAt?: string;
+}
 
 interface FollowUpContextType {
   contacts: Contact[];
@@ -96,6 +114,12 @@ interface FollowUpContextType {
   removeFollowUp: (followUpId: string) => Promise<void>;
   deleteFollowUp: (followUpId: string) => Promise<void>;
 
+  // Bulk Operations
+  bulkDeleteFollowUps: (ids: string[]) => Promise<void>;
+  bulkMarkAsPaid: (ids: string[]) => Promise<void>;
+  bulkUpdateStatus: (ids: string[], status: FollowUpStatus) => Promise<void>;
+  bulkDeleteContacts: (ids: string[]) => Promise<void>;
+
   // Leads & Appointments Methods
   addLead: (
     data: Omit<Lead, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
@@ -129,6 +153,9 @@ interface FollowUpContextType {
   changeEnrollmentStatus: (enrollmentId: string, status: SequenceEnrollmentStatus) => Promise<void>;
   removeEnrollment: (enrollmentId: string) => Promise<void>;
 
+  // Customer Response & Sequencer Handling
+  handleCustomerResponded: (contactId: string, responseNotes?: string, followUpId?: string) => Promise<void>;
+
   // Demo & Reset
   loadDemoData: () => Promise<void>;
   clearData: () => Promise<void>;
@@ -141,8 +168,26 @@ interface FollowUpContextType {
   aiModalOpen: boolean;
   aiTargetFollowUp: FollowUp | null;
   aiTargetContact: Contact | null;
-  openAiModal: (followUp?: FollowUp, contact?: Contact) => void;
+  aiInitialTemplate: { subject?: string; message?: string; channel?: FollowUpChannel; tone?: MessageTone; category?: string } | null;
+  openAiModal: (
+    followUp?: FollowUp,
+    contact?: Contact,
+    initialTemplate?: { subject?: string; message?: string; channel?: FollowUpChannel; tone?: MessageTone; category?: string }
+  ) => void;
   closeAiModal: () => void;
+  aiDraft: AiDraftState;
+  updateAiDraft: (partial: Partial<AiDraftState>) => void;
+  resetAiDraft: () => void;
+  generateAiFollowUpMessage: (params?: {
+    contact?: Contact;
+    followUp?: FollowUp;
+    channel?: FollowUpChannel;
+    tone?: MessageTone;
+    additionalContext?: string;
+    project?: string;
+    amount?: number;
+    currency?: string;
+  }) => Promise<{ subject: string; message: string }>;
 
   // Sequence Execution Modal State
   executeModalOpen: boolean;
@@ -173,7 +218,7 @@ interface FollowUpContextType {
 
   // Daily Follow-Up Rapid Session Mode
   followUpSessionOpen: boolean;
-  startFollowUpSession: () => void;
+  startFollowUpSession: (initialFollowUpId?: string) => void;
   closeFollowUpSession: () => void;
   sessionIndex: number;
   sessionQueue: FollowUp[];
@@ -186,10 +231,32 @@ interface FollowUpContextType {
 const FollowUpContext = createContext<FollowUpContextType | undefined>(undefined);
 
 export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, userProfile, isPro } = useAuth();
+  const { user, userProfile, isPro, incrementAiUsage } = useAuth();
 
-  const [contacts, setContacts] = useState<Contact[]>([]);
-  const [followUps, setFollowUps] = useState<FollowUp[]>([]);
+  const [contacts, setContacts] = useState<Contact[]>(() => {
+    try {
+      if (typeof window !== 'undefined' && user?.uid) {
+        const cached = localStorage.getItem(`followflow_contacts_${user.uid}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        }
+      }
+    } catch {}
+    return [];
+  });
+  const [followUps, setFollowUps] = useState<FollowUp[]>(() => {
+    try {
+      if (typeof window !== 'undefined' && user?.uid) {
+        const cached = localStorage.getItem(`followflow_followups_${user.uid}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        }
+      }
+    } catch {}
+    return [];
+  });
   const [leads, setLeads] = useState<Lead[]>([]);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [sequences, setSequences] = useState<Sequence[]>([]);
@@ -198,6 +265,80 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [loadingFollowUps, setLoadingFollowUps] = useState<boolean>(true);
   const [loadingSequences, setLoadingSequences] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Persistent storage mirrors: ensure user-provided data remains available after API calls
+  useEffect(() => {
+    if (!user?.uid) return;
+    try {
+      if (contacts.length > 0) {
+        localStorage.setItem(`followflow_contacts_${user.uid}`, JSON.stringify(contacts));
+      }
+    } catch {}
+  }, [contacts, user?.uid]);
+
+  useEffect(() => {
+    if (!user?.uid) return;
+    try {
+      if (followUps.length > 0) {
+        localStorage.setItem(`followflow_followups_${user.uid}`, JSON.stringify(followUps));
+      }
+    } catch {}
+  }, [followUps, user?.uid]);
+
+  // Centralized AI Draft State - Persisted across async operations and re-renders
+  const [aiDraft, setAiDraft] = useState<AiDraftState>(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        const cached = localStorage.getItem('followflow_active_ai_draft');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed && typeof parsed === 'object') return parsed;
+        }
+      }
+    } catch {}
+    return {
+      contactId: '',
+      followUpId: '',
+      subject: '',
+      messageText: '',
+      channel: 'email',
+      tone: 'professional',
+      contextInput: '',
+      isGenerating: false,
+      error: null,
+    };
+  });
+
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('followflow_active_ai_draft', JSON.stringify(aiDraft));
+      }
+    } catch {}
+  }, [aiDraft]);
+
+  const updateAiDraft = (partial: Partial<AiDraftState>) => {
+    setAiDraft((prev) => ({ ...prev, ...partial }));
+  };
+
+  const resetAiDraft = () => {
+    setAiDraft({
+      contactId: '',
+      followUpId: '',
+      subject: '',
+      messageText: '',
+      channel: 'email',
+      tone: 'professional',
+      contextInput: '',
+      isGenerating: false,
+      error: null,
+    });
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('followflow_active_ai_draft');
+      }
+    } catch {}
+  };
 
   // Leads & Appointments Modals State
   const [leadModalOpen, setLeadModalOpen] = useState<boolean>(false);
@@ -241,6 +382,13 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [aiModalOpen, setAiModalOpen] = useState<boolean>(false);
   const [aiTargetFollowUp, setAiTargetFollowUp] = useState<FollowUp | null>(null);
   const [aiTargetContact, setAiTargetContact] = useState<Contact | null>(null);
+  const [aiInitialTemplate, setAiInitialTemplate] = useState<{
+    subject?: string;
+    message?: string;
+    channel?: FollowUpChannel;
+    tone?: MessageTone;
+    category?: string;
+  } | null>(null);
 
   // Execute Step Modal State
   const [executeModalOpen, setExecuteModalOpen] = useState<boolean>(false);
@@ -273,7 +421,17 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setUpgradeReason('');
   };
 
-  const openAiModal = (followUp?: FollowUp, contact?: Contact) => {
+  const openAiModal = (
+    followUp?: FollowUp,
+    contact?: Contact,
+    initialTemplate?: {
+      subject?: string;
+      message?: string;
+      channel?: FollowUpChannel;
+      tone?: MessageTone;
+      category?: string;
+    }
+  ) => {
     setAiTargetFollowUp(followUp || null);
     if (contact) {
       setAiTargetContact(contact);
@@ -283,6 +441,30 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     } else {
       setAiTargetContact(null);
     }
+    setAiInitialTemplate(initialTemplate || null);
+
+    if (initialTemplate) {
+      setAiDraft((prev) => ({
+        ...prev,
+        contactId: contact?.id || followUp?.contactId || prev.contactId,
+        followUpId: followUp?.id || prev.followUpId,
+        subject: initialTemplate.subject || prev.subject,
+        messageText: initialTemplate.message || prev.messageText,
+        channel: initialTemplate.channel || prev.channel || 'email',
+        tone: initialTemplate.tone || prev.tone || 'professional',
+        error: null,
+      }));
+    } else if (followUp) {
+      setAiDraft((prev) => ({
+        ...prev,
+        contactId: followUp.contactId || prev.contactId,
+        followUpId: followUp.id,
+        channel: followUp.channel || prev.channel || 'email',
+        contextInput: followUp.description || prev.contextInput,
+        error: null,
+      }));
+    }
+
     setAiModalOpen(true);
   };
 
@@ -290,6 +472,128 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setAiModalOpen(false);
     setAiTargetFollowUp(null);
     setAiTargetContact(null);
+    setAiInitialTemplate(null);
+  };
+
+  const generateAiFollowUpMessage = async (params?: {
+    contact?: Contact;
+    followUp?: FollowUp;
+    channel?: FollowUpChannel;
+    tone?: MessageTone;
+    additionalContext?: string;
+    project?: string;
+    amount?: number;
+    currency?: string;
+  }): Promise<{ subject: string; message: string }> => {
+    setAiDraft((prev) => ({ ...prev, isGenerating: true, error: null }));
+
+    try {
+      const activeContact =
+        params?.contact ||
+        aiTargetContact ||
+        (aiDraft.contactId ? contacts.find((c) => c.id === aiDraft.contactId) : null) ||
+        (contacts.length > 0 ? contacts[0] : undefined);
+
+      const activeFollowUp =
+        params?.followUp ||
+        aiTargetFollowUp ||
+        (aiDraft.followUpId ? followUps.find((f) => f.id === aiDraft.followUpId) : null) ||
+        undefined;
+
+      const chosenChannel = params?.channel || aiDraft.channel || 'email';
+      const chosenTone = params?.tone || aiDraft.tone || 'professional';
+      const combinedContext = params?.additionalContext ?? aiDraft.contextInput ?? '';
+
+      const fallbackContact: Contact = activeContact || {
+        id: 'temp-contact',
+        userId: user?.uid || 'guest',
+        name: 'Client',
+        email: '',
+        tags: ['Client'],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const result = await generateFollowUpMessage({
+        contact: fallbackContact,
+        followUp: activeFollowUp || (params?.amount != null ? {
+          id: 'temp-fu',
+          userId: user?.uid || 'guest',
+          contactId: fallbackContact.id,
+          title: params?.project || 'Follow-up',
+          type: 'general',
+          channel: chosenChannel,
+          amount: params?.amount,
+          currency: params?.currency || '$',
+          status: 'pending',
+          dueDate: getTodayString(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        } as FollowUp : undefined),
+        tone: chosenTone,
+        channel: chosenChannel,
+        additionalContext: combinedContext,
+        userId: user?.uid,
+        isPro,
+        currentCount: userProfile?.aiGenerationsCount || 0,
+      });
+
+      const fallbackSubject = activeFollowUp?.title
+        ? `Following up on ${activeFollowUp.title}`
+        : fallbackContact?.name && fallbackContact.name !== 'Client'
+        ? `Following up with ${fallbackContact.name}`
+        : 'Quick follow-up';
+
+      const finalSubject = result.subject?.trim() || (chosenChannel === 'email' ? fallbackSubject : '');
+      const finalMessage = result.message || '';
+
+      // Update state in FollowUpContext so it's guaranteed to be preserved across re-renders
+      setAiDraft((prev) => ({
+        ...prev,
+        subject: finalSubject,
+        messageText: finalMessage,
+        channel: chosenChannel,
+        tone: chosenTone,
+        isGenerating: false,
+        error: null,
+        lastGeneratedAt: new Date().toISOString(),
+      }));
+
+      // Increment AI usage in AuthContext
+      await incrementAiUsage();
+
+      if (user && activeContact && !activeContact.id.startsWith('temp-')) {
+        await logGeneratedMessage(user.uid, {
+          followUpId: activeFollowUp?.id,
+          contactId: activeContact.id,
+          contactName: activeContact.name,
+          tone: chosenTone,
+          channel: chosenChannel,
+          context: combinedContext,
+          subject: finalSubject,
+          generatedContent: finalMessage,
+          finalContent: finalMessage,
+        }).catch(() => {});
+
+        await trackEvent('ai_message_generated', user.uid, {
+          tone: chosenTone,
+          channel: chosenChannel,
+          contactId: activeContact.id,
+          followUpId: activeFollowUp?.id,
+        }).catch(() => {});
+      }
+
+      return { subject: finalSubject, message: finalMessage };
+    } catch (err: any) {
+      const errMsg = err?.message || 'Failed to generate message. Please try again.';
+      console.error('[FollowUpContext] generateAiFollowUpMessage error:', err);
+      setAiDraft((prev) => ({
+        ...prev,
+        isGenerating: false,
+        error: errMsg,
+      }));
+      throw err;
+    }
   };
 
   const openExecuteModal = (enrollment: SequenceEnrollment) => {
@@ -319,7 +623,7 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setSequences(seqs);
       setSequenceEnrollments(enrolls);
     } catch (err: any) {
-      console.error('Failed to load sequences:', err);
+      console.warn('[Sequences] Sequences loading fallback:', err?.message || err);
     } finally {
       setLoadingSequences(false);
     }
@@ -327,7 +631,7 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   useEffect(() => {
     loadSequencesAndEnrollments();
-  }, [user]);
+  }, [user?.uid]);
 
   // Subscriptions to Firestore
   useEffect(() => {
@@ -352,7 +656,7 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setLoadingContacts(false);
       },
       (err) => {
-        setError(err.message);
+        console.warn('[Contacts] Subscription notice:', err?.message || err);
         setLoadingContacts(false);
       }
     );
@@ -364,7 +668,7 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setLoadingFollowUps(false);
       },
       (err) => {
-        setError(err.message);
+        console.warn('[FollowUps] Subscription notice:', err?.message || err);
         setLoadingFollowUps(false);
       }
     );
@@ -383,7 +687,7 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       unsubLeads();
       unsubAppointments();
     };
-  }, [user]);
+  }, [user?.uid]);
 
   // Derived Categorizations
   const {
@@ -440,8 +744,12 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, [followUps]);
 
+  const [customQueue, setCustomQueue] = useState<FollowUp[] | null>(null);
+
   // Priority Session Queue: Overdue first (descending days), then Today (highest amount first)
   const sessionQueue = useMemo(() => {
+    if (customQueue && customQueue.length > 0) return customQueue;
+
     const overdueSorted = [...overdueFollowUps].sort((a, b) => {
       const diffA = getDaysDiffFromToday(a.dueDate);
       const diffB = getDaysDiffFromToday(b.dueDate);
@@ -454,10 +762,26 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return amtB - amtA; // Higher amount first
     });
 
-    return [...overdueSorted, ...todaySorted];
-  }, [overdueFollowUps, todayFollowUps]);
+    const combined = [...overdueSorted, ...todaySorted];
+    return combined.length > 0 ? combined : activeFollowUps.slice(0, 10);
+  }, [overdueFollowUps, todayFollowUps, activeFollowUps, customQueue]);
 
-  const startFollowUpSession = () => {
+  const startFollowUpSession = (initialFollowUpId?: string) => {
+    if (initialFollowUpId) {
+      const target = followUps.find((f) => f.id === initialFollowUpId);
+      if (target) {
+        const baseQueue = [...overdueFollowUps, ...todayFollowUps];
+        const otherItems = baseQueue.filter((f) => f.id !== initialFollowUpId);
+        setCustomQueue([target, ...otherItems]);
+        setSessionIndex(0);
+        setFollowUpSessionOpen(true);
+        if (user) {
+          trackEvent('session_started', user.uid, { initialFollowUpId, count: otherItems.length + 1 });
+        }
+        return;
+      }
+    }
+    setCustomQueue(null);
     setSessionIndex(0);
     setFollowUpSessionOpen(true);
     if (user) {
@@ -468,6 +792,7 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const closeFollowUpSession = () => {
     setFollowUpSessionOpen(false);
     setSessionIndex(0);
+    setCustomQueue(null);
   };
 
   const nextSessionItem = () => {
@@ -568,6 +893,17 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     const contactId = await createContact(user.uid, data);
+    const now = new Date().toISOString();
+    const newContact: Contact = {
+      id: contactId,
+      userId: user.uid,
+      ...data,
+      createdAt: now,
+      updatedAt: now,
+    };
+    // Optimistically update contacts state immediately
+    setContacts((prev) => [newContact, ...prev.filter((c) => c.id !== contactId)]);
+
     await logTimelineEvent(user.uid, {
       contactId,
       type: 'created',
@@ -580,11 +916,15 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const handleEditContact = async (contactId: string, data: Partial<Contact>) => {
     if (!user) throw new Error('User must be logged in.');
+    setContacts((prev) =>
+      prev.map((c) => (c.id === contactId ? { ...c, ...data, updatedAt: new Date().toISOString() } : c))
+    );
     await updateContact(user.uid, contactId, data);
   };
 
   const handleRemoveContact = async (contactId: string) => {
     if (!user) throw new Error('User must be logged in.');
+    setContacts((prev) => prev.filter((c) => c.id !== contactId));
     await deleteContact(user.uid, contactId);
   };
 
@@ -606,6 +946,17 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     const followUpId = await createFollowUp(user.uid, data);
+    const now = new Date().toISOString();
+    const newFollowUp: FollowUp = {
+      id: followUpId,
+      userId: user.uid,
+      ...data,
+      createdAt: now,
+      updatedAt: now,
+    };
+    // Optimistically update followUps state immediately
+    setFollowUps((prev) => [newFollowUp, ...prev.filter((f) => f.id !== followUpId)]);
+
     await logTimelineEvent(user.uid, {
       contactId: data.contactId,
       followUpId,
@@ -626,30 +977,150 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const handleEditFollowUp = async (followUpId: string, data: Partial<FollowUp>) => {
     if (!user) throw new Error('User must be logged in.');
+    setFollowUps((prev) =>
+      prev.map((f) => (f.id === followUpId ? { ...f, ...data, updatedAt: new Date().toISOString() } : f))
+    );
     await updateFollowUp(user.uid, followUpId, data);
   };
 
   const handleMarkCompleted = async (followUpId: string) => {
     if (!user) throw new Error('User must be logged in.');
     const found = followUps.find((f) => f.id === followUpId);
+
+    setFollowUps((prev) =>
+      prev.map((f) =>
+        f.id === followUpId
+          ? { ...f, status: 'completed', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+          : f
+      )
+    );
     await completeFollowUp(user.uid, followUpId);
+
     if (found?.contactId) {
-      await logTimelineEvent(user.uid, {
-        contactId: found.contactId,
-        followUpId,
-        type: 'completed',
-        title: `Completed follow-up: "${found.title}"`,
-        amount: found.amount,
-        currency: found.currency,
-      });
+      if (found.type === 'invoice') {
+        // Genuine timeline event for invoice paid
+        await logTimelineEvent(user.uid, {
+          contactId: found.contactId,
+          followUpId,
+          type: 'invoice_paid',
+          title: `Invoice Paid: "${found.title}" (${found.currency || '$'}${found.amount ? found.amount.toLocaleString() : '0'})`,
+          amount: found.amount,
+          currency: found.currency,
+        });
+
+        // Response-Aware logic: Stop active invoice recovery sequences
+        const activeInvoiceEnrollments = sequenceEnrollments.filter(
+          (e) =>
+            e.contactId === found.contactId &&
+            e.status === 'active' &&
+            (e.sequenceName.toLowerCase().includes('invoice') ||
+              e.sequenceName.toLowerCase().includes('payment') ||
+              e.sequenceName.toLowerCase().includes('recovery'))
+        );
+
+        for (const enr of activeInvoiceEnrollments) {
+          await updateSequenceEnrollmentStatus(user.uid, enr.id, 'completed');
+          setSequenceEnrollments((prev) =>
+            prev.map((e) => (e.id === enr.id ? { ...e, status: 'completed' } : e))
+          );
+        }
+      } else if (found.type === 'proposal') {
+        await logTimelineEvent(user.uid, {
+          contactId: found.contactId,
+          followUpId,
+          type: 'completed',
+          title: `Proposal Accepted / Follow-Up Completed: "${found.title}"`,
+          amount: found.amount,
+          currency: found.currency,
+        });
+
+        // Response-Aware logic: Stop active proposal sequences
+        const activeProposalEnrollments = sequenceEnrollments.filter(
+          (e) =>
+            e.contactId === found.contactId &&
+            e.status === 'active' &&
+            (e.sequenceName.toLowerCase().includes('proposal') ||
+              e.sequenceName.toLowerCase().includes('pitch') ||
+              e.sequenceName.toLowerCase().includes('sales'))
+        );
+
+        for (const enr of activeProposalEnrollments) {
+          await updateSequenceEnrollmentStatus(user.uid, enr.id, 'completed');
+          setSequenceEnrollments((prev) =>
+            prev.map((e) => (e.id === enr.id ? { ...e, status: 'completed' } : e))
+          );
+        }
+      } else {
+        await logTimelineEvent(user.uid, {
+          contactId: found.contactId,
+          followUpId,
+          type: 'completed',
+          title: `Completed follow-up: "${found.title}"`,
+          amount: found.amount,
+          currency: found.currency,
+        });
+      }
     }
     await trackEvent('followup_completed', user.uid, { followUpId });
+  };
+
+  const handleCustomerResponded = async (contactId: string, responseNotes?: string, followUpId?: string) => {
+    if (!user) throw new Error('User must be logged in.');
+
+    // 1. Log real timeline event for response received
+    await logTimelineEvent(user.uid, {
+      contactId,
+      followUpId,
+      type: 'response_received',
+      title: 'Customer Response Received',
+      description: responseNotes || 'Customer replied to outreach. Active automated sequences paused.',
+    });
+
+    // 2. Response-Aware Logic: Automatically pause active sequence enrollments for this contact to avoid robotic follow-ups
+    const activeContactEnrollments = sequenceEnrollments.filter(
+      (e) => e.contactId === contactId && e.status === 'active'
+    );
+
+    for (const enr of activeContactEnrollments) {
+      await updateSequenceEnrollmentStatus(user.uid, enr.id, 'paused');
+      setSequenceEnrollments((prev) =>
+        prev.map((e) => (e.id === enr.id ? { ...e, status: 'paused' } : e))
+      );
+    }
+
+    // 3. Mark the follow-up as contacted with note
+    if (followUpId) {
+      setFollowUps((prev) =>
+        prev.map((f) =>
+          f.id === followUpId
+            ? {
+                ...f,
+                status: 'contacted',
+                lastContactedAt: new Date().toISOString(),
+                notes: responseNotes ? `${f.notes ? f.notes + ' | ' : ''}Customer response: ${responseNotes}` : f.notes,
+                updatedAt: new Date().toISOString(),
+              }
+            : f
+        )
+      );
+      await updateFollowUp(user.uid, followUpId, {
+        status: 'contacted',
+        lastContactedAt: new Date().toISOString(),
+      });
+    }
+
+    await trackEvent('customer_responded', user.uid, { contactId, followUpId });
   };
 
   const handleSnooze = async (followUpId: string, snoozeOption: number | string) => {
     if (!user) throw new Error('User must be logged in.');
     const found = followUps.find((f) => f.id === followUpId);
     const newDueDate = await snoozeFollowUp(user.uid, followUpId, snoozeOption);
+    setFollowUps((prev) =>
+      prev.map((f) =>
+        f.id === followUpId ? { ...f, dueDate: newDueDate, updatedAt: new Date().toISOString() } : f
+      )
+    );
     if (found?.contactId) {
       await logTimelineEvent(user.uid, {
         contactId: found.contactId,
@@ -663,7 +1134,75 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const handleRemoveFollowUp = async (followUpId: string) => {
     if (!user) throw new Error('User must be logged in.');
+    setFollowUps((prev) => prev.filter((f) => f.id !== followUpId));
     await deleteFollowUp(user.uid, followUpId);
+  };
+
+  // Bulk Operations Handlers
+  const handleBulkDeleteFollowUps = async (ids: string[]) => {
+    if (!user) throw new Error('User must be logged in.');
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    setFollowUps((prev) => prev.filter((f) => !idSet.has(f.id)));
+    await Promise.allSettled(ids.map((id) => deleteFollowUp(user.uid, id)));
+  };
+
+  const handleBulkMarkAsPaid = async (ids: string[]) => {
+    if (!user) throw new Error('User must be logged in.');
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    const now = new Date().toISOString();
+    setFollowUps((prev) =>
+      prev.map((f) =>
+        idSet.has(f.id)
+          ? { ...f, status: 'completed', completedAt: now, updatedAt: now }
+          : f
+      )
+    );
+    await Promise.allSettled(
+      ids.map(async (id) => {
+        await completeFollowUp(user.uid, id);
+        const item = followUps.find((f) => f.id === id);
+        if (item?.contactId) {
+          await logTimelineEvent(user.uid, {
+            contactId: item.contactId,
+            followUpId: id,
+            type: 'completed',
+            title: `Marked as paid: "${item.title}"`,
+            amount: item.amount,
+            currency: item.currency,
+          });
+        }
+        await trackEvent('followup_completed', user.uid, { followUpId: id, bulk: true });
+      })
+    );
+  };
+
+  const handleBulkUpdateStatus = async (ids: string[], status: FollowUpStatus) => {
+    if (!user) throw new Error('User must be logged in.');
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    const now = new Date().toISOString();
+    const updatePayload: Partial<FollowUp> = {
+      status,
+      updatedAt: now,
+      ...(status === 'contacted' ? { lastContactedAt: now } : {}),
+      ...(status === 'completed' ? { completedAt: now } : {}),
+    };
+    setFollowUps((prev) =>
+      prev.map((f) => (idSet.has(f.id) ? { ...f, ...updatePayload } : f))
+    );
+    await Promise.allSettled(
+      ids.map((id) => updateFollowUp(user.uid, id, updatePayload))
+    );
+  };
+
+  const handleBulkDeleteContacts = async (ids: string[]) => {
+    if (!user) throw new Error('User must be logged in.');
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    setContacts((prev) => prev.filter((c) => !idSet.has(c.id)));
+    await Promise.allSettled(ids.map((id) => deleteContact(user.uid, id)));
   };
 
   // Lead Actions
@@ -671,7 +1210,75 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     data: Omit<Lead, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
   ) => {
     if (!user) throw new Error('User must be logged in.');
+
+    // Deduplicate contact: check if contact already exists with same email, phone or exact name
+    const existingContact = contacts.find(
+      (c) =>
+        (data.email && c.email?.toLowerCase() === data.email.toLowerCase()) ||
+        (data.phone && c.phone === data.phone) ||
+        c.name.trim().toLowerCase() === data.name.trim().toLowerCase()
+    );
+
+    let contactId = existingContact?.id;
+    if (!contactId) {
+      // Create primary contact record without duplicates
+      contactId = await handleAddContact({
+        name: data.name,
+        company: data.company,
+        email: data.email,
+        phone: data.phone,
+        whatsapp: data.whatsapp,
+        tags: ['Lead'],
+        notes: data.notes,
+        preferredChannel: 'email',
+        communicationConsent: true,
+      });
+    }
+
     const result = await createLead(user.uid, data);
+
+    // Log genuine chronological timeline event
+    await logTimelineEvent(user.uid, {
+      contactId,
+      type: 'lead_created',
+      title: `Lead Created: "${data.name}"`,
+      description: `Stage: ${data.status} | Source: ${data.leadSource} | Deal Value: ${data.currency || '$'}${data.expectedDealValue ? data.expectedDealValue.toLocaleString() : '0'}`,
+      amount: data.expectedDealValue,
+      currency: data.currency,
+    });
+
+    // Emit reactive business event across system
+    emitBusinessEvent.leadCreated(user.uid, {
+      id: result.leadId,
+      name: data.name,
+      email: data.email,
+      phone: data.phone,
+      leadSource: data.leadSource,
+      expectedDealValue: data.expectedDealValue,
+    });
+
+    // Connect lifecycle to follow-up: if in proposal or negotiation stage, schedule priority follow-up
+    if (data.status === 'proposal' || data.status === 'proposal_sent' || data.status === 'negotiation') {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      await handleAddFollowUp({
+        contactId,
+        contactName: data.name,
+        contactCompany: data.company,
+        contactEmail: data.email,
+        contactPhone: data.phone,
+        title: `${data.status === 'negotiation' ? 'Negotiation Check-In' : 'Proposal Review'}: ${data.name}`,
+        type: data.status === 'negotiation' ? 'lead' : 'proposal',
+        amount: data.expectedDealValue,
+        currency: data.currency || '$',
+        dueDate: tomorrow.toISOString().split('T')[0],
+        priority: 'high',
+        channel: 'email',
+        status: 'pending',
+        description: `Active deal at ${data.status} stage. Expected value ${data.currency || '$'}${data.expectedDealValue?.toLocaleString() || '0'}.`,
+      });
+    }
+
     await trackEvent('lead_created', user.uid, {
       leadSource: data.leadSource,
       expectedDealValue: data.expectedDealValue,
@@ -681,7 +1288,77 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const handleEditLead = async (leadId: string, data: Partial<Lead>) => {
     if (!user) throw new Error('User must be logged in.');
+    const existingLead = leads.find((l) => l.id === leadId);
     await updateLead(user.uid, leadId, data);
+
+    const contact = contacts.find(
+      (c) =>
+        (existingLead?.email && c.email?.toLowerCase() === existingLead.email.toLowerCase()) ||
+        (existingLead?.name && c.name.toLowerCase() === existingLead.name.toLowerCase())
+    );
+
+    // If lifecycle stage updated to 'won'
+    if (data.status === 'won' && contact) {
+      // 1. Mark open proposal/lead follow-ups as completed
+      const openDealFollowUps = followUps.filter(
+        (f) => f.contactId === contact.id && f.status !== 'completed' && (f.type === 'proposal' || f.type === 'lead')
+      );
+      for (const f of openDealFollowUps) {
+        await handleMarkCompleted(f.id);
+      }
+
+      // 2. Stop active proposal sequences
+      const activeSeq = sequenceEnrollments.filter(
+        (e) => e.contactId === contact.id && e.status === 'active'
+      );
+      for (const enr of activeSeq) {
+        await updateSequenceEnrollmentStatus(user.uid, enr.id, 'completed');
+        setSequenceEnrollments((prev) =>
+          prev.map((e) => (e.id === enr.id ? { ...e, status: 'completed' } : e))
+        );
+      }
+
+      await logTimelineEvent(user.uid, {
+        contactId: contact.id,
+        type: 'completed',
+        title: `Deal Won: ${existingLead?.name || 'Lead'}`,
+        description: `Lead status updated to Won! Value: ${existingLead?.currency || '$'}${existingLead?.expectedDealValue?.toLocaleString() || '0'}.`,
+        amount: existingLead?.expectedDealValue,
+        currency: existingLead?.currency,
+      });
+    }
+
+    // If lifecycle stage updated to 'lost'
+    if (data.status === 'lost' && contact) {
+      const openDealFollowUps = followUps.filter(
+        (f) => f.contactId === contact.id && f.status !== 'completed'
+      );
+      for (const f of openDealFollowUps) {
+        await handleEditFollowUp(f.id, { status: 'cancelled' });
+      }
+
+      const activeSeq = sequenceEnrollments.filter(
+        (e) => e.contactId === contact.id && e.status === 'active'
+      );
+      for (const enr of activeSeq) {
+        await updateSequenceEnrollmentStatus(user.uid, enr.id, 'cancelled');
+        setSequenceEnrollments((prev) =>
+          prev.map((e) => (e.id === enr.id ? { ...e, status: 'cancelled' } : e))
+        );
+      }
+    }
+
+    // If stage changed to 'proposal'
+    if ((data.status === 'proposal' || data.status === 'proposal_sent') && contact) {
+      await logTimelineEvent(user.uid, {
+        contactId: contact.id,
+        type: 'proposal_created',
+        title: `Proposal Sent: "${existingLead?.name}"`,
+        description: `Proposal presented for value: ${existingLead?.currency || '$'}${existingLead?.expectedDealValue?.toLocaleString() || '0'}`,
+        amount: existingLead?.expectedDealValue,
+        currency: existingLead?.currency,
+      });
+    }
   };
 
   const handleRemoveLead = async (leadId: string) => {
@@ -698,6 +1375,14 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     await trackEvent('appointment_created', user.uid, {
       channel: data.channel,
       durationMinutes: data.durationMinutes,
+    });
+    emitBusinessEvent.appointmentCreated(user.uid, {
+      id: apptId,
+      title: data.title,
+      contactName: data.contactName,
+      scheduledAt: data.scheduledAt,
+      durationMinutes: data.durationMinutes,
+      expectedDealValue: data.expectedDealValue,
     });
     return apptId;
   };
@@ -726,6 +1411,15 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   ) => {
     if (!user) throw new Error('User must be logged in.');
     const id = await saveSequence(user.uid, data);
+    const now = new Date().toISOString();
+    const newSeq: Sequence = {
+      id,
+      userId: user.uid,
+      ...data,
+      createdAt: now,
+      updatedAt: now,
+    };
+    setSequences((prev) => [newSeq, ...prev.filter((s) => s.id !== id)]);
     await loadSequencesAndEnrollments();
     await trackEvent('sequence_created', user.uid, { name: data.name });
     return id;
@@ -736,12 +1430,16 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     data: Omit<Sequence, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
   ) => {
     if (!user) throw new Error('User must be logged in.');
+    setSequences((prev) =>
+      prev.map((s) => (s.id === sequenceId ? { ...s, ...data, updatedAt: new Date().toISOString() } : s))
+    );
     await saveSequence(user.uid, data, sequenceId);
     await loadSequencesAndEnrollments();
   };
 
   const handleRemoveSequence = async (sequenceId: string) => {
     if (!user) throw new Error('User must be logged in.');
+    setSequences((prev) => prev.filter((s) => s.id !== sequenceId));
     await deleteSequenceFromDb(user.uid, sequenceId);
     await loadSequencesAndEnrollments();
   };
@@ -751,6 +1449,16 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   ) => {
     if (!user) throw new Error('User must be logged in.');
     const id = await createSequenceEnrollment(user.uid, data);
+    const now = new Date().toISOString();
+    const newEnrollment: SequenceEnrollment = {
+      id,
+      userId: user.uid,
+      ...data,
+      history: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    setSequenceEnrollments((prev) => [newEnrollment, ...prev.filter((e) => e.id !== id)]);
     await loadSequencesAndEnrollments();
 
     // Trigger initial follow-up for Step 1 (preventing duplicates)
@@ -803,6 +1511,33 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   ) => {
     if (!user) throw new Error('User must be logged in.');
     const enrollment = sequenceEnrollments.find((e) => e.id === enrollmentId);
+
+    // Optimistically advance enrollment in React state
+    if (enrollment) {
+      const nextStepNum = enrollment.currentStepNumber + 1;
+      const isCompleted = nextStepNum > enrollment.totalSteps;
+      const nextDueDate = new Date();
+      if (nextDelayDays && nextDelayDays > 0) {
+        nextDueDate.setDate(nextDueDate.getDate() + nextDelayDays);
+      }
+      setSequenceEnrollments((prev) =>
+        prev.map((item) => {
+          if (item.id === enrollmentId) {
+            return {
+              ...item,
+              currentStepNumber: nextStepNum,
+              status: isCompleted ? 'completed' : item.status,
+              nextStepDueAt: isCompleted ? '' : nextDueDate.toISOString().split('T')[0],
+              nextStepChannel: nextChannel || item.nextStepChannel,
+              nextStepTitle: nextTitle || item.nextStepTitle,
+              history: [...(item.history || []), history],
+              updatedAt: new Date().toISOString(),
+            };
+          }
+          return item;
+        })
+      );
+    }
 
     await advanceSequenceEnrollment(
       user.uid,
@@ -888,12 +1623,16 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     status: SequenceEnrollmentStatus
   ) => {
     if (!user) throw new Error('User must be logged in.');
+    setSequenceEnrollments((prev) =>
+      prev.map((e) => (e.id === enrollmentId ? { ...e, status, updatedAt: new Date().toISOString() } : e))
+    );
     await updateSequenceEnrollmentStatus(user.uid, enrollmentId, status);
     await loadSequencesAndEnrollments();
   };
 
   const handleRemoveEnrollment = async (enrollmentId: string) => {
     if (!user) throw new Error('User must be logged in.');
+    setSequenceEnrollments((prev) => prev.filter((e) => e.id !== enrollmentId));
     await deleteSequenceEnrollment(user.uid, enrollmentId);
     await loadSequencesAndEnrollments();
   };
@@ -940,6 +1679,11 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         snooze: handleSnooze,
         removeFollowUp: handleRemoveFollowUp,
         deleteFollowUp: handleRemoveFollowUp,
+        bulkDeleteFollowUps: handleBulkDeleteFollowUps,
+        bulkMarkAsPaid: handleBulkMarkAsPaid,
+        bulkUpdateStatus: handleBulkUpdateStatus,
+        bulkDeleteContacts: handleBulkDeleteContacts,
+        handleCustomerResponded,
         addLead: handleAddLead,
         editLead: handleEditLead,
         removeLead: handleRemoveLead,
@@ -963,8 +1707,13 @@ export const FollowUpProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         aiModalOpen,
         aiTargetFollowUp,
         aiTargetContact,
+        aiInitialTemplate,
         openAiModal,
         closeAiModal,
+        aiDraft,
+        updateAiDraft,
+        resetAiDraft,
+        generateAiFollowUpMessage,
         executeModalOpen,
         activeEnrollmentToExecute,
         activeSequenceForExecution,

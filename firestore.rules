@@ -1,79 +1,95 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Helper function to check authentication
-    function isAuthenticated() {
-      return request.auth != null;
+    // Helper function: check if authenticated user matches document owner
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
     }
-    
-    // User can only access their own user document and all nested subcollections
+
+    // User document and all private user subcollections
     match /users/{userId} {
-      // User can read their own profile, but cannot tamper with plan/subscription status
-      allow read: if isAuthenticated() && request.auth.uid == userId;
-      allow create: if isAuthenticated() && request.auth.uid == userId
-        && (!('plan' in request.resource.data) || request.resource.data.plan == 'free')
-        && (!('subscriptionStatus' in request.resource.data) || request.resource.data.subscriptionStatus == 'free');
-      allow update: if isAuthenticated() && request.auth.uid == userId
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['plan', 'subscriptionStatus', 'isPro']);
-      allow delete: if isAuthenticated() && request.auth.uid == userId;
-      
+      // Allow user to read their own profile
+      allow read: if isOwner(userId);
+
+      // Prevent client-side elevation to 'pro' plan without server verification
+      allow create: if isOwner(userId) && (!('plan' in request.resource.data) || request.resource.data.plan == 'free');
+      allow update: if isOwner(userId) && (
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['plan', 'subscriptionStatus', 'isPro']) ||
+        (
+          (!('plan' in request.resource.data) || request.resource.data.plan == resource.data.plan) &&
+          (!('subscriptionStatus' in request.resource.data) || request.resource.data.subscriptionStatus == resource.data.subscriptionStatus) &&
+          (!('isPro' in request.resource.data) || request.resource.data.isPro == resource.data.isPro)
+        )
+      );
+
+      // Subcollections: strictly isolated to the owner
       match /contacts/{contactId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+        allow read, write: if isOwner(userId);
       }
 
       match /followUps/{followUpId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+        allow read, write: if isOwner(userId);
       }
 
-      match /messages/{messageId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
-      }
-
-      match /settings/{settingId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
-      }
-
-      // Subscription records are strictly read-only for clients, written server-side by verified Paystack webhook/verify
-      match /subscription/{subscriptionId} {
-        allow read: if isAuthenticated() && request.auth.uid == userId;
-        allow write: if false;
-      }
-
-      match /scheduled_emails/{jobId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
-      }
-
-      match /analytics/{eventId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+      match /templates/{templateId} {
+        allow read, write: if isOwner(userId);
       }
 
       match /sequences/{sequenceId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+        allow read, write: if isOwner(userId);
       }
 
       match /sequenceEnrollments/{enrollmentId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
-      }
-
-      match /timeline/{timelineId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+        allow read, write: if isOwner(userId);
       }
 
       match /leads/{leadId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+        allow read, write: if isOwner(userId);
       }
 
       match /appointments/{appointmentId} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+        allow read, write: if isOwner(userId);
       }
 
+      match /messages/{messageId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /timeline/{timelineId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /analytics/{analyticsId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /settings/{settingId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /scheduled_emails/{jobId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Subscription status subcollection: user can read their own, only Admin SDK writes
+      match /subscription/{subId} {
+        allow read: if isOwner(userId);
+        allow write: if false;
+      }
+
+      // Any other nested user subcollections
       match /{allSubcollections=**} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+        allow read, write: if isOwner(userId);
       }
     }
 
-    // Processed payments collection: written strictly server-side via Firebase Admin SDK for webhook idempotency
+    // Processed payments: server-side only via Firebase Admin SDK
     match /processed_payments/{paymentRef} {
+      allow read, write: if false;
+    }
+
+    // Default deny all other paths
+    match /{document=**} {
       allow read, write: if false;
     }
   }

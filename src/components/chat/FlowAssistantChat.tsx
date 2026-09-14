@@ -70,11 +70,11 @@ export const FlowAssistantChat: React.FC = () => {
   if (!flowChatOpen) return null;
 
   const quickPrompts = [
+    'What should I do today?',
+    'Which invoices are dangerous?',
+    'Which proposals went cold?',
+    'Summarize my revenue risk.',
     'What are my top 3 priority actions right now?',
-    'Who do I need to follow up with today?',
-    'What deals or proposals are overdue?',
-    'Who owes me money on invoices?',
-    'Draft a message for my highest priority lead',
   ];
 
   const handleSendMessage = async (textToSend?: string) => {

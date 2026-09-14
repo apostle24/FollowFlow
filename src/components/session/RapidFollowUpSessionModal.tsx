@@ -64,7 +64,17 @@ export const RapidFollowUpSessionModal: React.FC = () => {
     const body = encodeURIComponent(
       `Hi ${currentItem.contactName},\n\nI'm checking in regarding ${currentItem.title}.\n\nBest regards`
     );
-    window.open(`mailto:${email}?subject=${subject}&body=${body}`, '_blank');
+    const mailtoUrl = `mailto:${email}?subject=${subject}&body=${body}`;
+    const link = document.createElement('a');
+    link.href = mailtoUrl;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      try {
+        document.body.removeChild(link);
+      } catch {}
+    }, 200);
+    success('Launching email client...');
   };
 
   const handleCompleteCurrent = async () => {

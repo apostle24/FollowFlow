@@ -19,6 +19,7 @@ import {
   Building,
   User,
   ChevronDown,
+  Check,
 } from 'lucide-react';
 import type { FollowUp, FollowUpPriority, FollowUpType } from '../../types';
 
@@ -26,9 +27,19 @@ interface FollowUpCardProps {
   followUp: FollowUp;
   onEdit?: (followUp: FollowUp) => void;
   onDelete?: (followUp: FollowUp) => void;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (followUp: FollowUp) => void;
 }
 
-export const FollowUpCard: React.FC<FollowUpCardProps> = ({ followUp, onEdit, onDelete }) => {
+export const FollowUpCard: React.FC<FollowUpCardProps> = ({
+  followUp,
+  onEdit,
+  onDelete,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
+}) => {
   const { openAiModal, markCompleted, snooze, contacts } = useFollowUp();
   const { success, error: toastError, info } = useToast();
 
@@ -122,19 +133,19 @@ export const FollowUpCard: React.FC<FollowUpCardProps> = ({ followUp, onEdit, on
   };
 
   const handleQuickEmail = () => {
-    if (!contactEmail) {
-      openAiModal(followUp, matchedContact);
-      return;
-    }
-    const subject = encodeURIComponent(`Following up on ${followUp.title}`);
-    const body = encodeURIComponent(`Hi ${contactName},\n\nI hope you're having a great week! Just following up regarding ${followUp.title}.\n\nLooking forward to hearing from you.`);
-    window.open(`mailto:${contactEmail}?subject=${subject}&body=${body}`, '_blank');
+    openAiModal(followUp, matchedContact, {
+      channel: 'email',
+      subject: `Following up on ${followUp.title}`,
+      message: `Hi ${contactName},\n\nI hope you're having a great week! Just following up regarding ${followUp.title}.\n\nLooking forward to hearing from you.`,
+    });
   };
 
   return (
     <div
       className={`p-4 sm:p-5 rounded-2xl bg-white border transition-all hover:shadow-md relative ${
-        isOverdue
+        selected
+          ? 'ring-2 ring-blue-600 border-blue-400 bg-blue-50/30 shadow-sm'
+          : isOverdue
           ? 'border-rose-200 bg-rose-50/10'
           : isToday
           ? 'border-blue-200 bg-blue-50/10'
@@ -142,8 +153,28 @@ export const FollowUpCard: React.FC<FollowUpCardProps> = ({ followUp, onEdit, on
       }`}
     >
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        {/* Left info column */}
-        <div className="space-y-2 flex-1 min-w-0">
+        {/* Left info column with optional selection checkbox */}
+        <div className="flex items-start gap-3 flex-1 min-w-0">
+          {selectable && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleSelect?.(followUp);
+              }}
+              className={`w-5 h-5 rounded-md border flex items-center justify-center transition-all shrink-0 mt-0.5 ${
+                selected
+                  ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
+                  : 'border-slate-300 bg-white hover:border-blue-400 text-transparent hover:bg-slate-50'
+              }`}
+              title={selected ? 'Deselect item' : 'Select item'}
+              aria-label={selected ? 'Deselect item' : 'Select item'}
+            >
+              <Check className="w-3.5 h-3.5 stroke-[3]" />
+            </button>
+          )}
+
+          <div className="space-y-2 flex-1 min-w-0">
           {/* Badges row */}
           <div className="flex flex-wrap items-center gap-2">
             {/* Due date status badge */}
@@ -233,6 +264,7 @@ export const FollowUpCard: React.FC<FollowUpCardProps> = ({ followUp, onEdit, on
             )}
           </div>
         </div>
+      </div>
 
         {/* Right Action Bar */}
         <div className="flex items-center gap-2 shrink-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-slate-100 justify-between lg:justify-end">

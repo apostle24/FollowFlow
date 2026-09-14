@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useFollowUp } from '../../context/FollowUpContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../common/Toast';
@@ -111,9 +111,12 @@ export const SmartSummaryCard: React.FC = () => {
     [loading, hasLoadedOnce, userProfile, pendingItems, contacts, success]
   );
 
+  const hasTriggeredFetchRef = useRef<boolean>(false);
+
   // Auto-fetch on initial mount if not yet loaded
   useEffect(() => {
-    if (!hasLoadedOnce && pendingItems.length > 0) {
+    if (!hasLoadedOnce && !hasTriggeredFetchRef.current && pendingItems.length > 0) {
+      hasTriggeredFetchRef.current = true;
       loadSummary(false);
     }
   }, [hasLoadedOnce, pendingItems.length, loadSummary]);
@@ -186,7 +189,15 @@ export const SmartSummaryCard: React.FC = () => {
     const subject = `Follow up: ${action.actionTitle}`;
     const body = action.recommendedMessageHook || `Hi ${action.contactName},\n\nI hope you're having a great week! Just following up regarding ${action.actionTitle}.`;
     const mailto = `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    window.location.href = mailto;
+    const link = document.createElement('a');
+    link.href = mailto;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      try {
+        document.body.removeChild(link);
+      } catch {}
+    }, 200);
     success(`Opening email client for ${action.contactName}`);
   };
 
@@ -348,7 +359,7 @@ export const SmartSummaryCard: React.FC = () => {
           )}
 
           {/* Active Summary Content */}
-          {summary && (
+          {summary && pendingItems.length > 0 && (
             <>
               {/* Executive Briefing Banner */}
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-2xl bg-gradient-to-r from-slate-50 via-indigo-50/40 to-slate-50 border border-indigo-100/80">

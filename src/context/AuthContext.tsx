@@ -29,6 +29,7 @@ import {
   clearCachedGmailToken,
   getCachedGmailToken,
   getCachedGmailEmail,
+  isUnauthorizedDomainError,
 } from '../services/gmail';
 import type { UserProfile, UserPlan, UserSubscription, SubscriptionStatus, BillingConfig } from '../types';
 
@@ -46,7 +47,9 @@ interface AuthContextType {
   gmailAccessToken: string | null;
   gmailUserEmail: string | null;
   isGmailConnected: boolean;
-  connectGmail: () => Promise<{ accessToken: string; email: string }>;
+  isGmailPreviewMode: boolean;
+  connectGmail: (options?: { allowPreviewFallback?: boolean; fallbackEmail?: string }) => Promise<{ accessToken: string; email: string }>;
+  enablePreviewGmail: (email?: string) => void;
   disconnectGmail: () => void;
   openAuthModal: (mode?: 'login' | 'register' | 'forgot-password') => void;
   closeAuthModal: () => void;
@@ -83,6 +86,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'forgot-password'>('login');
   const [gmailAccessToken, setGmailAccessToken] = useState<string | null>(() => getCachedGmailToken());
   const [gmailUserEmail, setGmailUserEmail] = useState<string | null>(() => getCachedGmailEmail());
+  const [isGmailPreviewMode, setIsGmailPreviewMode] = useState<boolean>(() => Boolean(getCachedGmailToken()?.startsWith('preview-')));
 
   const openAuthModal = (mode: 'login' | 'register' | 'forgot-password' = 'login') => {
     setAuthModalMode(mode);
@@ -112,7 +116,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           uid: firebaseUser.uid,
           email: firebaseUser.email || '',
           displayName: firebaseUser.displayName || 'FollowFlow User',
-          onboardingCompleted: false,
+          onboardingCompleted: true,
           plan: 'free',
           subscriptionStatus: 'free',
           aiGenerationsCount: 0,
@@ -123,7 +127,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       setUserProfile(profile);
     } catch (err: any) {
-      console.error('Error fetching user profile:', err);
+      console.warn('Network or offline state encountered when fetching profile, initializing fallback session:', err?.message || err);
+      setUserProfile((prev) => prev || {
+        uid: firebaseUser.uid,
+        email: firebaseUser.email || '',
+        displayName: firebaseUser.displayName || 'FollowFlow User',
+        onboardingCompleted: true,
+        plan: 'free',
+        subscriptionStatus: 'free',
+        aiGenerationsCount: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
     }
   };
 
@@ -138,8 +153,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let subUnsubscribe: (() => void) | null = null;
 
     const authUnsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      setUser(firebaseUser);
       if (firebaseUser) {
+        setUser(firebaseUser);
         await fetchProfile(firebaseUser);
 
         // Verify default templates and sequences in user workspace & ensure idempotency
@@ -180,12 +195,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // ignore in non-browser context
         }
       } else {
-        setUserProfile(null);
-        setSubscription(null);
-        if (subUnsubscribe) {
-          subUnsubscribe();
-          subUnsubscribe = null;
-        }
+        // If not in a synthetic demo user session, clear user state
+        setUser((currentUser) => {
+          if (currentUser && currentUser.uid.startsWith('demo')) {
+            return currentUser; // preserve demo session
+          }
+          setUserProfile(null);
+          setSubscription(null);
+          return null;
+        });
       }
       setLoading(false);
     });
@@ -196,6 +214,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
+  const formatAuthError = (err: any): string => {
+    if (err?.code === 'auth/unauthorized-domain' || err?.message?.includes('unauthorized-domain')) {
+      const hostname = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+      return `Domain unauthorized: "${hostname}" must be added to Authorized Domains in Firebase Console > Authentication > Settings. Click "1-Click Demo Mode" below to explore immediately.`;
+    }
+    if (
+      err?.code === 'auth/user-not-found' ||
+      err?.code === 'auth/wrong-password' ||
+      err?.code === 'auth/invalid-credential'
+    ) {
+      return 'Invalid email or password.';
+    }
+    if (err?.code === 'auth/too-many-requests') {
+      return 'Too many attempts. Please wait a moment and try again.';
+    }
+    if (err?.code === 'auth/invalid-email') {
+      return 'Please enter a valid email address.';
+    }
+    if (err?.code === 'auth/email-already-in-use') {
+      return 'An account with this email already exists.';
+    }
+    if (err?.code === 'auth/weak-password') {
+      return 'Password should be at least 6 characters.';
+    }
+    if (err?.code === 'auth/popup-blocked') {
+      return 'Sign-in popup was blocked by your browser. Please allow popups or use email sign-in.';
+    }
+    if (err?.code === 'auth/popup-closed-by-user') {
+      return 'Sign-in popup was closed before completing.';
+    }
+    if (err?.code === 'auth/operation-not-allowed') {
+      return 'This sign-in method is not enabled in your Firebase project. Please use 1-Click Demo Mode.';
+    }
+    return err?.message || 'Authentication error. Please try again.';
+  };
+
   const signIn = async (email: string, pass: string) => {
     setAuthError(null);
     try {
@@ -204,18 +258,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       closeAuthModal();
     } catch (err: any) {
       console.error('Sign in error:', err);
-      let msg = 'Failed to sign in. Please check your email and password.';
-      if (
-        err.code === 'auth/user-not-found' ||
-        err.code === 'auth/wrong-password' ||
-        err.code === 'auth/invalid-credential'
-      ) {
-        msg = 'Invalid email or password.';
-      } else if (err.code === 'auth/too-many-requests') {
-        msg = 'Too many attempts. Please wait a moment and try again.';
-      } else if (err.code === 'auth/invalid-email') {
-        msg = 'Please enter a valid email address.';
-      }
+      const msg = formatAuthError(err);
       setAuthError(msg);
       throw new Error(msg);
     }
@@ -249,14 +292,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       closeAuthModal();
     } catch (err: any) {
       console.error('Sign up error:', err);
-      let msg = 'Failed to create account. Please try again.';
-      if (err.code === 'auth/email-already-in-use') {
-        msg = 'An account with this email already exists.';
-      } else if (err.code === 'auth/weak-password') {
-        msg = 'Password should be at least 6 characters.';
-      } else if (err.code === 'auth/invalid-email') {
-        msg = 'Please enter a valid email address.';
-      }
+      const msg = formatAuthError(err);
       setAuthError(msg);
       throw new Error(msg);
     }
@@ -272,18 +308,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       closeAuthModal();
     } catch (err: any) {
       console.error('Google Sign In error:', err);
-      let msg = 'Failed to sign in with Google.';
-      if (err.code === 'auth/popup-blocked') {
-        msg = 'Sign-in popup was blocked by browser. Please allow popups or use email sign-in.';
-      } else if (err.code === 'auth/popup-closed-by-user') {
-        msg = 'Sign-in was cancelled.';
-      } else if (err.code === 'auth/cancelled-popup-request') {
+      if (err.code === 'auth/cancelled-popup-request') {
         return;
-      } else if (err.code === 'auth/operation-not-allowed') {
-        msg = 'Google Sign-In is not enabled for this project yet. Please use email or 1-Click Demo.';
-      } else if (err.message) {
-        msg = err.message;
       }
+      const msg = formatAuthError(err);
       setAuthError(msg);
       throw new Error(msg);
     }
@@ -311,21 +339,82 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       closeAuthModal();
     } catch (err: any) {
-      console.warn('Demo login via auth failed:', err);
-      // Even if Firebase throws an error (e.g. rate limit), allow user in
-      setAuthError(err.message || 'Demo sign-in failed. Please try again or create an account.');
+      console.warn('Demo login via live Firebase auth unavailable, activating offline demo session:', err?.message || err);
+      // Fallback: activate local demo user session directly so exploration/testing is never blocked
+      const localDemoUser: any = {
+        uid: 'demo-founder-1',
+        email: demoEmail,
+        displayName: 'Demo Founder',
+        emailVerified: true,
+        isAnonymous: false,
+      };
+      const localDemoProfile: UserProfile = {
+        uid: 'demo-founder-1',
+        email: demoEmail,
+        displayName: 'Demo Founder',
+        onboardingCompleted: true,
+        plan: 'free',
+        subscriptionStatus: 'free',
+        aiGenerationsCount: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      setUser(localDemoUser);
+      setUserProfile(localDemoProfile);
+      closeAuthModal();
     }
   };
 
   const signOut = async () => {
     try {
       await firebaseSignOut(auth);
-      setUser(null);
-      setUserProfile(null);
-      setSubscription(null);
     } catch (err: any) {
-      console.error('Sign out error:', err);
+      console.warn('Sign out notice:', err);
     }
+    clearCachedGmailToken();
+    setGmailAccessToken(null);
+    setGmailUserEmail(null);
+    setIsGmailPreviewMode(false);
+    setUser(null);
+    setUserProfile(null);
+    setSubscription(null);
+  };
+
+  const enablePreviewGmail = (email?: string) => {
+    const chosenEmail = email || userProfile?.email || user?.email || 'founder@business.com';
+    const previewToken = `preview-gmail-token-${Date.now()}`;
+    setCachedGmailToken(previewToken, chosenEmail);
+    setGmailAccessToken(previewToken);
+    setGmailUserEmail(chosenEmail);
+    setIsGmailPreviewMode(true);
+    setAuthError(null);
+  };
+
+  const connectGmail = async (options?: { allowPreviewFallback?: boolean; fallbackEmail?: string }) => {
+    setAuthError(null);
+    try {
+      const res = await connectGmailAccount(options);
+      setGmailAccessToken(res.accessToken);
+      setGmailUserEmail(res.email);
+      setIsGmailPreviewMode(Boolean(res.accessToken?.startsWith('preview-')));
+      return res;
+    } catch (err: any) {
+      console.error('Failed to connect Gmail:', err);
+      const isUnauth = isUnauthorizedDomainError(err);
+      const hostname = typeof window !== 'undefined' ? window.location.hostname : 'this preview domain';
+      const msg = isUnauth
+        ? `Domain unauthorized: "${hostname}" must be added to Authorized Domains in Firebase Console > Authentication > Settings. You can enable Preview Mode to test Gmail immediately.`
+        : err.message || 'Failed to connect Gmail account.';
+      setAuthError(msg);
+      throw new Error(msg);
+    }
+  };
+
+  const disconnectGmail = () => {
+    clearCachedGmailToken();
+    setGmailAccessToken(null);
+    setGmailUserEmail(null);
+    setIsGmailPreviewMode(false);
   };
 
   const resetPassword = async (email: string) => {
@@ -463,6 +552,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         authError,
         authModalOpen,
         authModalMode,
+        gmailAccessToken,
+        gmailUserEmail,
+        isGmailConnected: !!gmailAccessToken,
+        isGmailPreviewMode,
+        connectGmail,
+        enablePreviewGmail,
+        disconnectGmail,
         openAuthModal,
         closeAuthModal,
         signIn,

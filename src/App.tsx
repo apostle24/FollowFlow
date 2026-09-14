@@ -1,10 +1,12 @@
 import React from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { FollowUpProvider } from './context/FollowUpContext';
+import { BusinessOsProvider } from './context/BusinessOsContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { LandingPage } from './components/landing/LandingPage';
 import { AuthModal } from './components/auth/AuthModal';
 import { ToastProvider } from './components/common/Toast';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { Sparkles } from 'lucide-react';
 
 const MainApp: React.FC = () => {
@@ -26,11 +28,17 @@ const MainApp: React.FC = () => {
     <>
       <AuthModal />
       {user ? (
-        <FollowUpProvider>
-          <AppLayout />
-        </FollowUpProvider>
+        <ErrorBoundary viewName="FollowFlow Core Application">
+          <FollowUpProvider>
+            <BusinessOsProvider>
+              <AppLayout />
+            </BusinessOsProvider>
+          </FollowUpProvider>
+        </ErrorBoundary>
       ) : (
-        <LandingPage />
+        <ErrorBoundary viewName="Landing Page">
+          <LandingPage />
+        </ErrorBoundary>
       )}
     </>
   );
@@ -38,10 +46,12 @@ const MainApp: React.FC = () => {
 
 export default function App() {
   return (
-    <ToastProvider>
-      <AuthProvider>
-        <MainApp />
-      </AuthProvider>
-    </ToastProvider>
+    <ErrorBoundary viewName="Root Application">
+      <ToastProvider>
+        <AuthProvider>
+          <MainApp />
+        </AuthProvider>
+      </ToastProvider>
+    </ErrorBoundary>
   );
 }

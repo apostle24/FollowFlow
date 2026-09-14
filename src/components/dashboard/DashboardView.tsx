@@ -2,7 +2,9 @@ import React, { useState } from 'react';
 import { useFollowUp } from '../../context/FollowUpContext';
 import { useAuth } from '../../context/AuthContext';
 import { StatCards } from './StatCards';
+import { DeliveryMetricsBar } from './DeliveryMetricsBar';
 import { SmartSummaryCard } from './SmartSummaryCard';
+import { RevenuePaymentCharts } from './RevenuePaymentCharts';
 import { FollowUpCard } from './FollowUpCard';
 import {
   Sparkles,
@@ -99,7 +101,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
           {(todayFollowUps.length > 0 || overdueFollowUps.length > 0) && (
             <button
-              onClick={startFollowUpSession}
+              onClick={() => startFollowUpSession()}
               className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-stone-950 text-xs font-bold shadow-sm shadow-amber-500/20 flex items-center gap-1.5 transition-all"
             >
               <Zap className="w-4 h-4 fill-stone-950" />
@@ -119,6 +121,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* Summary Cards */}
       <StatCards />
+
+      {/* Real Multi-Channel Delivery Engine Status & Metrics */}
+      <DeliveryMetricsBar />
 
       {/* Sequence Cadence Due Notification Banner */}
       {dueSequenceEnrollments.length > 0 && (
@@ -156,6 +161,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* AI-Powered Smart Summary: Top 3 Priority Actions */}
       <SmartSummaryCard />
+
+      {/* Monthly Revenue Trends & Upcoming Payment Deadlines */}
+      <RevenuePaymentCharts
+        onOpenNewFollowUp={onOpenNewFollowUp}
+        onEditFollowUp={onEditFollowUp}
+      />
 
       {/* Smart Categorized Queue Tabs */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 sm:p-6">
